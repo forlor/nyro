@@ -22,26 +22,14 @@ use self::runner::RaceRunner;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/openai/v1/chat/completions", post(openai_chat_completions))
+        .route("/openai/v1/responses", post(openai_responses))
+        .route("/anthropic/v1/messages", post(anthropic_messages))
         .route(
-            "/groups/:group_id/openai/v1/chat/completions",
-            post(openai_chat_completions),
-        )
-        .route(
-            "/groups/:group_id/openai/v1/responses",
-            post(openai_responses),
-        )
-        .route(
-            "/groups/:group_id/anthropic/v1/messages",
-            post(anthropic_messages),
-        )
-        .route(
-            "/groups/:group_id/google/v1beta/models/:model_action",
+            "/google/v1beta/models/:model_action",
             post(google_v1beta_models),
         )
-        .route(
-            "/groups/:group_id/google/models/:model_action",
-            post(google_v1_models),
-        )
+        .route("/google/models/:model_action", post(google_v1_models))
         .with_state(state)
 }
 
@@ -57,95 +45,82 @@ async fn healthz(State(state): State<AppState>) -> axum::Json<HealthResponse> {
 
 async fn openai_chat_completions(
     State(state): State<AppState>,
-    Path(group_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response<Body>, ProxyError> {
     proxy_route(
         state,
         ProxyRouteRequest::new(
-            group_id,
             DownstreamRouteKind::OpenAiChatCompletions,
             None,
             headers,
             body,
-        ),
+        )
+        .map_err(ProxyError::bad_request)?,
     )
     .await
 }
 
 async fn openai_responses(
     State(state): State<AppState>,
-    Path(group_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response<Body>, ProxyError> {
     proxy_route(
         state,
-        ProxyRouteRequest::new(
-            group_id,
-            DownstreamRouteKind::OpenAiResponses,
-            None,
-            headers,
-            body,
-        ),
+        ProxyRouteRequest::new(DownstreamRouteKind::OpenAiResponses, None, headers, body)
+            .map_err(ProxyError::bad_request)?,
     )
     .await
 }
 
 async fn anthropic_messages(
     State(state): State<AppState>,
-    Path(group_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response<Body>, ProxyError> {
     proxy_route(
         state,
-        ProxyRouteRequest::new(
-            group_id,
-            DownstreamRouteKind::AnthropicMessages,
-            None,
-            headers,
-            body,
-        ),
+        ProxyRouteRequest::new(DownstreamRouteKind::AnthropicMessages, None, headers, body)
+            .map_err(ProxyError::bad_request)?,
     )
     .await
 }
 
 async fn google_v1beta_models(
     State(state): State<AppState>,
-    Path((group_id, model_action)): Path<(String, String)>,
+    Path(model_action): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response<Body>, ProxyError> {
     proxy_route(
         state,
         ProxyRouteRequest::new(
-            group_id,
             DownstreamRouteKind::GoogleV1BetaModels,
             Some(model_action),
             headers,
             body,
-        ),
+        )
+        .map_err(ProxyError::bad_request)?,
     )
     .await
 }
 
 async fn google_v1_models(
     State(state): State<AppState>,
-    Path((group_id, model_action)): Path<(String, String)>,
+    Path(model_action): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response<Body>, ProxyError> {
     proxy_route(
         state,
         ProxyRouteRequest::new(
-            group_id,
             DownstreamRouteKind::GoogleV1Models,
             Some(model_action),
             headers,
             body,
-        ),
+        )
+        .map_err(ProxyError::bad_request)?,
     )
     .await
 }
@@ -187,6 +162,13 @@ struct ProxyError {
 }
 
 impl ProxyError {
+    fn bad_request(error: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: error.to_string(),
+        }
+    }
+
     fn internal(error: anyhow::Error) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

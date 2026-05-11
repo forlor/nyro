@@ -258,7 +258,7 @@
 ```bash
 cd race-gateway
 cargo run --bin race-loadtest -- \
-  --url http://127.0.0.1:2090/groups/demo/openai/v1/chat/completions \
+  --url http://127.0.0.1:2090/openai/v1/chat/completions \
   --requests 100 \
   --concurrency 20 \
   --timeout-ms 60000 \
@@ -271,6 +271,8 @@ cargo run --bin race-loadtest -- \
 
 - 验证竞速首包延迟
 - 对比不同 group 配置
+  - OpenAI / Anthropic 通过请求体 `model` 选择 group
+  - Google 通过 URL 里的 `:model_action` 模型前缀选择 group
 - 结合 `/admin/metrics` 看吞吐和活跃竞速数
 
 ### 4.3 联动观察方法

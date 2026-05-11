@@ -68,6 +68,7 @@ impl RaceRunner {
             },
             request_headers: request.headers.clone(),
             request_body: request.body.clone(),
+            request_json_body: request.json_body.clone(),
         });
 
         RaceCore::new(

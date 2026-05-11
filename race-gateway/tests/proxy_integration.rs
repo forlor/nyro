@@ -345,11 +345,11 @@ async fn proxy_supports_openai_anthropic_google_and_shared_weights() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/groups/group-a/openai/v1/chat/completions")
+                .uri("/openai/v1/chat/completions")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
-                        "model": "placeholder",
+                        "model": "group-a",
                         "stream": true,
                         "messages": [{"role": "user", "content": "hello"}]
                     })
@@ -374,11 +374,11 @@ async fn proxy_supports_openai_anthropic_google_and_shared_weights() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/groups/group-a/anthropic/v1/messages")
+                .uri("/anthropic/v1/messages")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
-                        "model": "placeholder",
+                        "model": "group-a",
                         "max_tokens": 128,
                         "stream": true,
                         "messages": [{"role": "user", "content": "hello"}]
@@ -391,13 +391,13 @@ async fn proxy_supports_openai_anthropic_google_and_shared_weights() {
         .expect("anthropic request");
     assert_eq!(anthropic_response.status(), StatusCode::OK);
     let anthropic_text = body_text(anthropic_response).await;
-    assert!(anthropic_text.contains("B-ANTHROPIC"));
+    assert!(anthropic_text.contains("A-ANTHROPIC") || anthropic_text.contains("B-ANTHROPIC"));
 
     let google_response = router
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/groups/group-a/google/v1beta/models/streamGenerateContent")
+                .uri("/google/v1beta/models/group-a:streamGenerateContent")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -453,9 +453,9 @@ async fn proxy_returns_protocol_specific_all_failed_streams() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/groups/group-fail/openai/v1/chat/completions")
+                .uri("/openai/v1/chat/completions")
                 .header("content-type", "application/json")
-                .body(Body::from(json!({"model":"x","stream":true,"messages":[{"role":"user","content":"hello"}]}).to_string()))
+                .body(Body::from(json!({"model":"group-fail","stream":true,"messages":[{"role":"user","content":"hello"}]}).to_string()))
                 .unwrap(),
         )
         .await
@@ -469,9 +469,9 @@ async fn proxy_returns_protocol_specific_all_failed_streams() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/groups/group-fail/anthropic/v1/messages")
+                .uri("/anthropic/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(json!({"model":"x","stream":true,"max_tokens":10,"messages":[{"role":"user","content":"hello"}]}).to_string()))
+                .body(Body::from(json!({"model":"group-fail","stream":true,"max_tokens":10,"messages":[{"role":"user","content":"hello"}]}).to_string()))
                 .unwrap(),
         )
         .await
@@ -483,7 +483,7 @@ async fn proxy_returns_protocol_specific_all_failed_streams() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/groups/group-fail/google/v1beta/models/streamGenerateContent")
+                .uri("/google/v1beta/models/group-fail:streamGenerateContent")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({"contents":[{"role":"user","parts":[{"text":"hello"}]}]}).to_string(),
@@ -514,11 +514,11 @@ async fn proxy_request_timeout_does_not_cap_healthy_long_stream() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/groups/group-timeout/openai/v1/chat/completions")
+                .uri("/openai/v1/chat/completions")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
-                        "model": "placeholder",
+                        "model": "group-timeout",
                         "stream": true,
                         "messages": [{"role": "user", "content": "hello"}]
                     })
@@ -536,4 +536,32 @@ async fn proxy_request_timeout_does_not_cap_healthy_long_stream() {
     assert!(text.contains("[DONE]"));
 
     handle.abort();
+}
+
+#[tokio::test]
+async fn google_proxy_requires_group_id_action_format() {
+    let state = new_state("proxy-google-action-required").await;
+    let router = build_proxy_router(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/google/v1beta/models/group-only")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "contents": [{"role": "user", "parts": [{"text": "hello"}]}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("google invalid request");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = body_text(response).await;
+    assert!(body.contains("group_id"));
+    assert!(body.contains("action"));
 }

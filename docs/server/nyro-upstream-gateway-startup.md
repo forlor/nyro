@@ -329,11 +329,13 @@ nyro-server \
 
 - proxy
   - `GET /healthz`
-  - `POST /groups/:group_id/openai/v1/chat/completions`
-  - `POST /groups/:group_id/openai/v1/responses`
-  - `POST /groups/:group_id/anthropic/v1/messages`
-  - `POST /groups/:group_id/google/v1beta/models/:model_action`
-  - `POST /groups/:group_id/google/models/:model_action`
+  - `POST /openai/v1/chat/completions`
+  - `POST /openai/v1/responses`
+  - `POST /anthropic/v1/messages`
+  - `POST /google/v1beta/models/:model_action`
+  - `POST /google/models/:model_action`
+  - OpenAI / Anthropic 通过请求体里的 `model` 解析竞速组 ID
+  - Google 通过 `:model_action` 的模型前缀解析竞速组 ID，例如 `group-a:streamGenerateContent`
 - admin
   - `GET /admin`
   - `GET /admin/healthz`
@@ -574,7 +576,7 @@ curl http://127.0.0.1:2091/admin/runtime/groups
 ```bash
 cd race-gateway
 cargo run --bin race-loadtest -- \
-  --url http://127.0.0.1:2090/groups/demo/openai/v1/chat/completions \
+  --url http://127.0.0.1:2090/openai/v1/chat/completions \
   --requests 50 \
   --concurrency 10 \
   --header content-type:application/json \

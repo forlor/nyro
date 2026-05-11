@@ -98,13 +98,18 @@ admin 端口职责：
 
 ## 5. 路由边界
 
-第一阶段采用 group-path 入口，而不是复刻原 Python 项目的外层模型名路由：
+第一阶段采用协议原生入口，竞速组从请求中的模型标识解析：
 
-- `POST /groups/:group_id/openai/v1/chat/completions`
-- `POST /groups/:group_id/openai/v1/responses`
-- `POST /groups/:group_id/anthropic/v1/messages`
-- `POST /groups/:group_id/google/v1beta/models/:model_action`
-- `POST /groups/:group_id/google/models/:model_action`
+- `POST /openai/v1/chat/completions`
+- `POST /openai/v1/responses`
+- `POST /anthropic/v1/messages`
+- `POST /google/v1beta/models/:model_action`
+- `POST /google/models/:model_action`
+
+解析规则：
+
+- OpenAI / Anthropic：读取请求体 `model` 作为竞速组 ID
+- Google：读取 `:model_action` 的模型前缀作为竞速组 ID，例如 `group-a:streamGenerateContent`
 
 健康与管理：
 

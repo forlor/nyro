@@ -34,7 +34,7 @@ curl http://127.0.0.1:3401/admin/metrics
 
 ```bash
 cargo run --bin race-loadtest -- \
-  --url http://127.0.0.1:3400/groups/demo/openai/v1/chat/completions \
+  --url http://127.0.0.1:3400/openai/v1/chat/completions \
   --requests 200 \
   --concurrency 20 \
   --timeout-ms 60000 \
@@ -69,7 +69,7 @@ cargo run --bin race-loadtest -- \
 
 ```json
 {
-  "model": "placeholder",
+  "model": "demo",
   "stream": true,
   "messages": [
     {
@@ -82,6 +82,7 @@ cargo run --bin race-loadtest -- \
 
 说明：
 
-- `model` 字段会在 `race-gateway` 下游发起请求前按目标 candidate 的 `upstream_model` 覆盖。
+- OpenAI / Anthropic 的 `model` 字段用于标识竞速组 ID，例如这里的 `demo`。
+- 竞速组选定后，`race-gateway` 会在下游发起请求前把 `model` 覆盖为目标 candidate 的 `upstream_model`。
 - OpenAI / Anthropic 路由建议显式带 `stream: true`。
 - Google 路由请准备对应协议格式的 body 文件。

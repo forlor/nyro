@@ -384,26 +384,28 @@
     - 接口草案 8
   - 文件：
     - `race-gateway/src/data_plane/mod.rs`
-  - 交付：
-    - `/groups/:group_id/openai/v1/chat/completions`
-    - `/groups/:group_id/openai/v1/responses`
-    - `/groups/:group_id/anthropic/v1/messages`
-    - `/groups/:group_id/google/v1beta/models/:model_action`
-    - `/groups/:group_id/google/models/:model_action`
-  - 验收：
-    - 路由 smoke test 通过
+    - 交付：
+      - `/openai/v1/chat/completions`
+      - `/openai/v1/responses`
+      - `/anthropic/v1/messages`
+      - `/google/v1beta/models/:model_action`
+      - `/google/models/:model_action`
+    - 验收：
+      - 路由 smoke test 通过
 
 - `[todo]` RG-T5.3 实现请求上下文解析
   - 设计关联：
     - 接口草案 6.4
   - 文件：
     - `race-gateway/src/data_plane/request.rs`
-  - 交付：
-    - `group_id`
-    - `protocol_family`
-    - `route_kind`
-    - 原始 `HeaderMap`
-    - 原始 `Bytes`
+    - 交付：
+      - `group_id`
+        - OpenAI / Anthropic 从请求体 `model` 解析
+        - Google 从 `:model_action` 的模型前缀解析
+      - `protocol_family`
+      - `route_kind`
+      - 原始 `HeaderMap`
+      - 原始 `Bytes`
   - 验收：
     - 每种协议 family 的解析测试通过
 

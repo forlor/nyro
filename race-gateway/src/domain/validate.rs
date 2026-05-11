@@ -8,6 +8,7 @@ use super::{
 const MIN_RESPONSE_PROTECTION_TIMEOUT_MS: u64 = 1_000;
 const MAX_RESPONSE_PROTECTION_TIMEOUT_MS: u64 = 120_000;
 const MAX_CANDIDATES_PER_GROUP: usize = 8;
+const FORBIDDEN_GROUP_ID_CHARS: [char; 2] = [':', '/'];
 
 #[derive(Debug, Default)]
 pub struct ValidationBuilder {
@@ -86,6 +87,15 @@ pub fn validate_group(group: &RaceGroup) -> ValidationErrorResponse {
 
     if group.id.trim().is_empty() {
         builder.push("id", "required", "group id cannot be empty");
+    } else if let Some(character) = first_forbidden_group_id_char(group.id.trim()) {
+        builder.push(
+            "id",
+            "invalid_group_id",
+            format!(
+                "group id cannot contain '{}' because it is incompatible with protocol routing",
+                character
+            ),
+        );
     }
     if group.display_name.trim().is_empty() {
         builder.push("display_name", "required", "display_name cannot be empty");
@@ -251,6 +261,12 @@ where
     }
 }
 
+fn first_forbidden_group_id_char(value: &str) -> Option<char> {
+    value
+        .chars()
+        .find(|character| FORBIDDEN_GROUP_ID_CHARS.contains(character))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -405,5 +421,40 @@ mod tests {
         let result = validate_group(&group);
         assert!(!result.valid);
         assert!(result.issues.iter().any(|issue| issue.code == "required"));
+    }
+
+    #[test]
+    fn group_validation_rejects_google_incompatible_group_id() {
+        let group = RaceGroup {
+            id: "google:bad".to_string(),
+            display_name: "G".to_string(),
+            fallback_ratio: 0.5,
+            decay_factor: 0.8,
+            penalty_rate: 1.0,
+            recovery_rate: 1.0,
+            race_max_wait_time_ms: None,
+            enabled: true,
+            candidates: vec![RaceCandidate {
+                id: "a".to_string(),
+                group_id: "google:bad".to_string(),
+                name: "A".to_string(),
+                model_id: None,
+                upstream_model: "m".to_string(),
+                inline_endpoint_overrides: vec![],
+                initial_weight: 100.0,
+                response_protection_timeout_ms: 2_000,
+                enabled: true,
+                metadata: json!({}),
+            }],
+        };
+
+        let result = validate_group(&group);
+        assert!(!result.valid);
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|issue| issue.code == "invalid_group_id")
+        );
     }
 }

@@ -771,11 +771,11 @@ CREATE TABLE race_settings (
 
 ### 8.2 OpenAI Chat
 
-- `POST /groups/:group_id/openai/v1/chat/completions`
+- `POST /openai/v1/chat/completions`
 
 行为：
 
-1. 读取 `group_id`
+1. 从请求体 `model` 读取 `group_id`
 2. 解析 OpenAI 请求体
 3. 以 `ProtocolFamily::OpenAi` 进入 `RaceRunner`
 4. 并发发起候选
@@ -783,7 +783,7 @@ CREATE TABLE race_settings (
 
 ### 8.3 OpenAI Responses
 
-- `POST /groups/:group_id/openai/v1/responses`
+- `POST /openai/v1/responses`
 
 Phase 1 建议：
 
@@ -792,7 +792,7 @@ Phase 1 建议：
 
 ### 8.4 Anthropic Messages
 
-- `POST /groups/:group_id/anthropic/v1/messages`
+- `POST /anthropic/v1/messages`
 
 行为：
 
@@ -801,12 +801,13 @@ Phase 1 建议：
 
 ### 8.5 Gemini
 
-- `POST /groups/:group_id/google/v1beta/models/:model_action`
-- `POST /groups/:group_id/google/models/:model_action`
+- `POST /google/v1beta/models/:model_action`
+- `POST /google/models/:model_action`
 
 行为：
 
 - `model_action` 参与下游 URL 构造
+- `model_action` 的模型前缀同时作为 `group_id`，例如 `group-a:streamGenerateContent`
 - 由 Google adapter 判断有效内容
 
 ## 9. Admin API 草案

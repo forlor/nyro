@@ -458,3 +458,54 @@ async fn admin_delete_group_clears_runtime_handle() {
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
     assert!(state.runtime.get_group("group-a").is_none());
 }
+
+#[tokio::test]
+async fn admin_rejects_group_id_incompatible_with_google_route() {
+    let state = new_state("admin-group-id-validation").await;
+    seed_admin_fixture(&state).await;
+    let router = build_admin_router(state);
+
+    let invalid_group = json!({
+        "id": "group:bad",
+        "display_name": "Bad Group",
+        "fallback_ratio": 0.0,
+        "decay_factor": 1.0,
+        "penalty_rate": 40.0,
+        "recovery_rate": 0.0,
+        "race_max_wait_time_ms": 15000,
+        "enabled": true,
+        "candidates": [{
+            "id": "cand-bad",
+            "group_id": "group:bad",
+            "name": "A",
+            "model_id": "model-a",
+            "upstream_model": "vendor/model-a",
+            "inline_endpoint_overrides": [],
+            "initial_weight": 100.0,
+            "response_protection_timeout_ms": 1000,
+            "enabled": true,
+            "metadata": {}
+        }]
+    });
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/admin/groups/group:bad")
+                .header("content-type", "application/json")
+                .body(Body::from(invalid_group.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("invalid group id");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = json_body(response).await;
+    assert_eq!(json["valid"], false);
+    assert!(json["issues"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue["code"] == "invalid_group_id")
+    }));
+}

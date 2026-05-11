@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use async_stream::try_stream;
@@ -35,14 +36,19 @@ impl ReqwestDownstreamDispatcher {
         route: &DispatchRoute,
         request_headers: &HeaderMap,
         request_body: Bytes,
+        request_json_body: Option<Arc<Value>>,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>> {
         let url = build_request_url(
             &participant.endpoint.base_url,
             route,
             &participant.candidate.upstream_model,
         )?;
-        let body =
-            rewrite_request_body(route, &participant.candidate.upstream_model, request_body)?;
+        let body = rewrite_request_body(
+            route,
+            &participant.candidate.upstream_model,
+            request_body,
+            request_json_body.as_deref(),
+        )?;
         debug!(
             candidate = %participant.candidate.name,
             protocol = ?route.route_kind,
@@ -160,6 +166,7 @@ pub struct DownstreamStreamFactory {
     pub route: DispatchRoute,
     pub request_headers: HeaderMap,
     pub request_body: Bytes,
+    pub request_json_body: Option<Arc<Value>>,
 }
 
 #[async_trait]
@@ -174,6 +181,7 @@ impl CandidateStreamFactory for DownstreamStreamFactory {
                 &self.route,
                 &self.request_headers,
                 self.request_body.clone(),
+                self.request_json_body.clone(),
             )
             .await
     }
@@ -213,9 +221,14 @@ fn rewrite_request_body(
     route: &DispatchRoute,
     upstream_model: &str,
     request_body: Bytes,
+    request_json_body: Option<&Value>,
 ) -> anyhow::Result<Bytes> {
-    let mut value =
-        serde_json::from_slice::<Value>(&request_body).context("invalid json request body")?;
+    let mut value = match request_json_body {
+        Some(value) => value.clone(),
+        None => {
+            serde_json::from_slice::<Value>(&request_body).context("invalid json request body")?
+        }
+    };
     match route.route_kind {
         DownstreamRouteKind::OpenAiChatCompletions | DownstreamRouteKind::OpenAiResponses => {
             value["model"] = Value::String(upstream_model.to_string());
