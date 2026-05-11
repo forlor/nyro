@@ -1,5 +1,6 @@
 pub mod models;
 
+use std::ffi::c_char;
 use std::path::Path;
 use std::sync::Once;
 
@@ -16,11 +17,14 @@ const VECTOR_DIMENSIONS_SETTING_KEY: &str = "vector_embedding_dimensions";
 pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
     SQLITE_VEC_INIT.call_once(|| unsafe {
         // Register sqlite-vec once per process. All later SQLite connections can use vec0 tables.
+        // sqlite3_auto_extension uses platform c_char for the error-message
+        // pointer. sqlite-vec exports the same ABI, so cast through a raw
+        // pointer using the host c_char signedness.
         libsqlite3_sys::sqlite3_auto_extension(Some(std::mem::transmute::<
             *const (),
             unsafe extern "C" fn(
                 *mut libsqlite3_sys::sqlite3,
-                *mut *mut i8,
+                *mut *mut c_char,
                 *const libsqlite3_sys::sqlite3_api_routines,
             ) -> i32,
         >(sqlite3_vec_init as *const ())));
