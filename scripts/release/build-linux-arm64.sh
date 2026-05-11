@@ -6,6 +6,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist/linux-arm64}"
 BUILD_UPSTREAM_WEBUI="${BUILD_UPSTREAM_WEBUI:-1}"
 SYNC_RACE_ADMIN_ASSETS="${SYNC_RACE_ADMIN_ASSETS:-1}"
+CARGO_BIN=""
+NPM_BIN=""
+CMAKE_BIN=""
 
 log() {
   printf '[build-linux-arm64] %s\n' "$*"
@@ -18,6 +21,33 @@ fail() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+bootstrap_toolchain_env() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    if [[ -f "${HOME}/.cargo/env" ]]; then
+      # shellcheck disable=SC1090
+      . "${HOME}/.cargo/env"
+    elif [[ -d "${HOME}/.cargo/bin" ]]; then
+      export PATH="${HOME}/.cargo/bin:${PATH}"
+    fi
+  fi
+}
+
+resolve_cmd() {
+  local name="$1"
+
+  if command -v "${name}" >/dev/null 2>&1; then
+    command -v "${name}"
+    return 0
+  fi
+
+  if [[ -x "${HOME}/.cargo/bin/${name}" ]]; then
+    printf '%s\n' "${HOME}/.cargo/bin/${name}"
+    return 0
+  fi
+
+  fail "missing required command: ${name}"
 }
 
 sync_race_admin_assets() {
@@ -40,15 +70,15 @@ build_upstream_webui() {
   webui_dir="${REPO_ROOT}/upstream-gateway/webui"
 
   [[ -d "${webui_dir}" ]] || fail "missing upstream-gateway webui directory: ${webui_dir}"
-  require_cmd npm
+  [[ -n "${NPM_BIN}" ]] || fail "npm resolver was not initialized"
 
   pushd "${webui_dir}" >/dev/null
   if [[ -f package-lock.json ]]; then
-    npm ci
+    "${NPM_BIN}" ci
   else
-    npm install
+    "${NPM_BIN}" install
   fi
-  npm run build
+  "${NPM_BIN}" run build
   popd >/dev/null
 
   log "built upstream-gateway webui"
@@ -60,7 +90,7 @@ build_rust_binary() {
   shift 2
 
   pushd "${workdir}" >/dev/null
-  cargo build --release "$@"
+  "${CARGO_BIN}" build --release "$@"
   popd >/dev/null
 
   log "built ${manifest_label}"
@@ -90,8 +120,17 @@ copy_artifacts() {
 }
 
 main() {
-  require_cmd cargo
-  require_cmd cmake
+  bootstrap_toolchain_env
+
+  CARGO_BIN="$(resolve_cmd cargo)"
+  CMAKE_BIN="$(resolve_cmd cmake)"
+  if command -v npm >/dev/null 2>&1; then
+    NPM_BIN="$(command -v npm)"
+  elif [[ -x "${HOME}/.cargo/bin/npm" ]]; then
+    NPM_BIN="${HOME}/.cargo/bin/npm"
+  else
+    NPM_BIN=""
+  fi
 
   if [[ "$(uname -s)" != "Linux" ]]; then
     fail "this script is intended to run on a Linux host"
@@ -104,6 +143,9 @@ main() {
       log "warning: host architecture is $(uname -m), not ARM64"
       ;;
   esac
+
+  log "using cargo: ${CARGO_BIN}"
+  log "using cmake: ${CMAKE_BIN}"
 
   if [[ "${BUILD_UPSTREAM_WEBUI}" == "1" ]]; then
     build_upstream_webui
