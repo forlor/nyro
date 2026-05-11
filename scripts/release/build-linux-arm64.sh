@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist/linux-arm64}"
 BUILD_UPSTREAM_WEBUI="${BUILD_UPSTREAM_WEBUI:-1}"
+BUILD_NYRO_WEBUI="${BUILD_NYRO_WEBUI:-1}"
 SYNC_RACE_ADMIN_ASSETS="${SYNC_RACE_ADMIN_ASSETS:-1}"
 CARGO_BIN=""
 NPM_BIN=""
@@ -84,6 +85,25 @@ build_upstream_webui() {
   log "built upstream-gateway webui"
 }
 
+build_nyro_webui() {
+  local webui_dir
+  webui_dir="${REPO_ROOT}/webui"
+
+  [[ -d "${webui_dir}" ]] || fail "missing nyro webui directory: ${webui_dir}"
+  [[ -n "${NPM_BIN}" ]] || fail "npm resolver was not initialized"
+
+  pushd "${webui_dir}" >/dev/null
+  if [[ -f package-lock.json ]]; then
+    "${NPM_BIN}" ci
+  else
+    "${NPM_BIN}" install
+  fi
+  "${NPM_BIN}" run build
+  popd >/dev/null
+
+  log "built nyro webui"
+}
+
 build_rust_binary() {
   local workdir="$1"
   local manifest_label="$2"
@@ -146,6 +166,12 @@ main() {
 
   log "using cargo: ${CARGO_BIN}"
   log "using cmake: ${CMAKE_BIN}"
+
+  if [[ "${BUILD_NYRO_WEBUI}" == "1" ]]; then
+    build_nyro_webui
+  else
+    log "skipping nyro webui build because BUILD_NYRO_WEBUI=${BUILD_NYRO_WEBUI}"
+  fi
 
   if [[ "${BUILD_UPSTREAM_WEBUI}" == "1" ]]; then
     build_upstream_webui
