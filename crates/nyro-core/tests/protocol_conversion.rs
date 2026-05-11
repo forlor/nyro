@@ -1502,8 +1502,15 @@ fn gemini_encoder_sanitizes_unsupported_json_schema_fields() {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "additionalProperties": false,
+                "propertyNames": {
+                    "pattern": "^[a-z_]+$"
+                },
                 "properties": {
                     "pattern": {"type": "string"},
+                    "limit": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                    },
                     "items": {
                         "type": "array",
                         "items": {
@@ -1540,6 +1547,23 @@ fn gemini_encoder_sanitizes_unsupported_json_schema_fields() {
     assert!(!rendered.contains("$ref"));
     assert!(!rendered.contains("\"ref\""));
     assert!(!rendered.contains("$defs"));
+    assert!(!rendered.contains("propertyNames"));
+    assert!(!rendered.contains("exclusiveMinimum"));
+
+    let root_description = params
+        .get("description")
+        .and_then(|v| v.as_str())
+        .expect("root description");
+    assert!(root_description.contains("Additional properties are not allowed."));
+    assert!(root_description.contains("Object property names should match regex"));
+
+    let limit_description = params
+        .get("properties")
+        .and_then(|v| v.get("limit"))
+        .and_then(|v| v.get("description"))
+        .and_then(|v| v.as_str())
+        .expect("limit description");
+    assert!(limit_description.contains("strictly greater than 0"));
 }
 
 fn responses_request(messages: Vec<InternalMessage>, stream: bool) -> InternalRequest {

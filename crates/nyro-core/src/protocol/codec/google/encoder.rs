@@ -139,25 +139,119 @@ fn sanitize_gemini_schema(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
+            let mut notes = Vec::new();
             for (k, v) in map {
-                if matches!(
-                    k.as_str(),
-                    "$schema"
-                        | "additionalProperties"
-                        | "$ref"
-                        | "ref"
-                        | "definitions"
-                        | "$defs"
-                ) {
+                if let Some(note) = gemini_schema_compatibility_note(k, v) {
+                    notes.push(note);
+                }
+                if is_gemini_unsupported_schema_keyword(k) {
                     continue;
                 }
                 out.insert(k.clone(), sanitize_gemini_schema(v));
             }
+            append_description_notes(&mut out, notes);
             Value::Object(out)
         }
         Value::Array(arr) => Value::Array(arr.iter().map(sanitize_gemini_schema).collect()),
         _ => value.clone(),
     }
+}
+
+fn append_description_notes(out: &mut serde_json::Map<String, Value>, notes: Vec<String>) {
+    if notes.is_empty() {
+        return;
+    }
+
+    let mut notes = notes;
+    notes.dedup();
+    let suffix = format!("Gemini compatibility hints: {}", notes.join(" "));
+
+    match out.get_mut("description") {
+        Some(Value::String(description)) => {
+            if !description.contains(&suffix) {
+                if !description.is_empty() {
+                    description.push_str("\n\n");
+                }
+                description.push_str(&suffix);
+            }
+        }
+        _ => {
+            out.insert("description".into(), Value::String(suffix));
+        }
+    }
+}
+
+fn gemini_schema_compatibility_note(key: &str, value: &Value) -> Option<String> {
+    match key {
+        "additionalProperties" => match value {
+            Value::Bool(false) => Some("Additional properties are not allowed.".to_string()),
+            Value::Bool(true) => Some("Additional properties are allowed.".to_string()),
+            _ => Some(
+                "Additional properties have schema constraints that Gemini does not enforce directly."
+                    .to_string(),
+            ),
+        },
+        "propertyNames" => {
+            if let Some(pattern) = value.get("pattern").and_then(|entry| entry.as_str()) {
+                Some(format!(
+                    "Object property names should match regex `{pattern}`."
+                ))
+            } else {
+                Some(
+                    "Object property names have extra validation rules that Gemini does not enforce directly."
+                        .to_string(),
+                )
+            }
+        }
+        "exclusiveMinimum" => schema_number_note(
+            value,
+            "Value must be strictly greater than",
+        ),
+        "exclusiveMaximum" => schema_number_note(
+            value,
+            "Value must be strictly less than",
+        ),
+        "patternProperties" => Some(
+            "Some property-name regex patterns carry additional value constraints."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+fn schema_number_note(value: &Value, prefix: &str) -> Option<String> {
+    match value {
+        Value::Number(number) => Some(format!("{prefix} {number}.")),
+        Value::String(text) => Some(format!("{prefix} {text}.")),
+        _ => None,
+    }
+}
+
+fn is_gemini_unsupported_schema_keyword(key: &str) -> bool {
+    matches!(
+        key,
+        "$schema"
+            | "additionalProperties"
+            | "$ref"
+            | "ref"
+            | "definitions"
+            | "$defs"
+            | "propertyNames"
+            | "patternProperties"
+            | "unevaluatedProperties"
+            | "dependentRequired"
+            | "dependentSchemas"
+            | "if"
+            | "then"
+            | "else"
+            | "not"
+            | "contains"
+            | "minContains"
+            | "maxContains"
+            | "prefixItems"
+            | "exclusiveMinimum"
+            | "exclusiveMaximum"
+    )
 }
 
 // ── Content encoding ──────────────────────────────────────────────────────────
