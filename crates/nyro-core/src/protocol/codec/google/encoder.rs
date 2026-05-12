@@ -149,11 +149,58 @@ fn sanitize_gemini_schema(value: &Value) -> Value {
                 }
                 out.insert(k.clone(), sanitize_gemini_schema(v));
             }
+            reconcile_required_with_properties(&mut out, &mut notes);
             append_description_notes(&mut out, notes);
             Value::Object(out)
         }
         Value::Array(arr) => Value::Array(arr.iter().map(sanitize_gemini_schema).collect()),
         _ => value.clone(),
+    }
+}
+
+fn reconcile_required_with_properties(
+    out: &mut serde_json::Map<String, Value>,
+    notes: &mut Vec<String>,
+) {
+    let property_names = out
+        .get("properties")
+        .and_then(|value| value.as_object())
+        .map(|properties| {
+            properties
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+
+    let Some(required) = out.get_mut("required").and_then(|value| value.as_array_mut()) else {
+        return;
+    };
+
+    let Some(property_names) = property_names else {
+        if !required.is_empty() {
+            notes.push(
+                "Some required fields were dropped because the matching properties are unavailable after Gemini compatibility sanitization.".to_string(),
+            );
+        }
+        required.clear();
+        return;
+    };
+
+    let mut dropped = Vec::new();
+    required.retain(|entry| match entry.as_str() {
+        Some(name) if property_names.contains(name) => true,
+        Some(name) => {
+            dropped.push(name.to_string());
+            false
+        }
+        None => false,
+    });
+
+    if !dropped.is_empty() {
+        notes.push(format!(
+            "Required fields omitted for Gemini compatibility because their property definitions are unavailable: {}.",
+            dropped.join(", ")
+        ));
     }
 }
 

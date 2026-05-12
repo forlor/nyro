@@ -1505,6 +1505,7 @@ fn gemini_encoder_sanitizes_unsupported_json_schema_fields() {
                 "propertyNames": {
                     "pattern": "^[a-z_]+$"
                 },
+                "required": ["pattern", "missing_after_sanitize"],
                 "properties": {
                     "pattern": {"type": "string"},
                     "limit": {
@@ -1556,6 +1557,15 @@ fn gemini_encoder_sanitizes_unsupported_json_schema_fields() {
         .expect("root description");
     assert!(root_description.contains("Additional properties are not allowed."));
     assert!(root_description.contains("Object property names should match regex"));
+    assert!(root_description.contains("Required fields omitted for Gemini compatibility"));
+    assert!(root_description.contains("missing_after_sanitize"));
+
+    let required = params
+        .get("required")
+        .and_then(|v| v.as_array())
+        .expect("required array");
+    assert_eq!(required.len(), 1);
+    assert_eq!(required[0].as_str(), Some("pattern"));
 
     let limit_description = params
         .get("properties")
