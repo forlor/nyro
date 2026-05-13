@@ -116,6 +116,8 @@ pub enum AnthropicContentBlock {
         name: String,
         input: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
     #[serde(rename = "tool_result")]

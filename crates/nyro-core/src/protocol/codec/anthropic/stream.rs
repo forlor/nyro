@@ -57,11 +57,18 @@ impl ResponseParser for AnthropicResponseParser {
                             block.get("id").and_then(|v| v.as_str()),
                             block.get("name").and_then(|v| v.as_str()),
                         ) {
-                            let input = block.get("input").cloned().unwrap_or(Value::Object(Default::default()));
+                            let input = block
+                                .get("input")
+                                .cloned()
+                                .unwrap_or(Value::Object(Default::default()));
                             tool_calls.push(ToolCall {
                                 id: tc_id.to_string(),
                                 name: name.to_string(),
                                 arguments: input.to_string(),
+                                thought_signature: block
+                                    .get("thought_signature")
+                                    .and_then(|value| value.as_str())
+                                    .map(ToOwned::to_owned),
                             });
                         }
                     }
@@ -113,12 +120,22 @@ impl ResponseFormatter for AnthropicResponseFormatter {
     fn format_response(&self, resp: &InternalResponse) -> Value {
         let mut content = Vec::new();
 
-        if let Some(reasoning) = resp.reasoning_content.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        if let Some(reasoning) = resp
+            .reasoning_content
+            .as_ref()
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
             let mut block = serde_json::json!({
                 "type": "thinking",
                 "thinking": reasoning,
             });
-            if let Some(signature) = resp.reasoning_signature.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            if let Some(signature) = resp
+                .reasoning_signature
+                .as_ref()
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
                 block
                     .as_object_mut()
                     .expect("thinking block is an object")
@@ -134,12 +151,18 @@ impl ResponseFormatter for AnthropicResponseFormatter {
         for tc in &resp.tool_calls {
             let input: Value =
                 serde_json::from_str(&tc.arguments).unwrap_or(Value::Object(Default::default()));
-            content.push(serde_json::json!({
+            let mut tool_use = serde_json::json!({
                 "type": "tool_use",
                 "id": tc.id,
                 "name": tc.name,
                 "input": input,
-            }));
+            });
+            if let Some(signature) = tc.thought_signature.as_ref()
+                && let Some(obj) = tool_use.as_object_mut()
+            {
+                obj.insert("thought_signature".into(), serde_json::json!(signature));
+            }
+            content.push(tool_use);
         }
 
         let stop_reason = resp.stop_reason.as_deref().map(|r| match r {
@@ -207,9 +230,10 @@ impl StreamParser for AnthropicStreamParser {
             }
 
             if let Some(data) = data_str
-                && let Ok(json) = serde_json::from_str::<Value>(&data) {
-                    parse_anthropic_event(event_type.as_deref(), &json, &mut deltas);
-                }
+                && let Ok(json) = serde_json::from_str::<Value>(&data)
+            {
+                parse_anthropic_event(event_type.as_deref(), &json, &mut deltas);
+            }
         }
 
         Ok(deltas)
@@ -252,10 +276,7 @@ fn parse_anthropic_event(event_type: Option<&str>, data: &Value, deltas: &mut Ve
             }
         }
         Some("content_block_start") => {
-            let idx = data
-                .get("index")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            let idx = data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             if let Some(block) = data.get("content_block") {
                 match block.get("type").and_then(|t| t.as_str()) {
                     Some("tool_use") => {
@@ -269,7 +290,15 @@ fn parse_anthropic_event(event_type: Option<&str>, data: &Value, deltas: &mut Ve
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        deltas.push(StreamDelta::ToolCallStart { index: idx, id, name });
+                        deltas.push(StreamDelta::ToolCallStart {
+                            index: idx,
+                            id,
+                            name,
+                            thought_signature: block
+                                .get("thought_signature")
+                                .and_then(|v| v.as_str())
+                                .map(ToOwned::to_owned),
+                        });
                     }
                     // Anthropic server-side tool blocks (web_search, code_execution,
                     // mcp_tool_use, etc.) and any future block types not yet known:
@@ -312,11 +341,8 @@ fn parse_anthropic_event(event_type: Option<&str>, data: &Value, deltas: &mut Ve
                     }
                     Some("input_json_delta") => {
                         if let Some(json) = delta.get("partial_json").and_then(|t| t.as_str()) {
-                            let idx = data
-                                .get("index")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0)
-                                as usize;
+                            let idx =
+                                data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                             deltas.push(StreamDelta::ToolCallDelta {
                                 index: idx,
                                 arguments: json.to_string(),
@@ -357,7 +383,9 @@ fn parse_anthropic_event(event_type: Option<&str>, data: &Value, deltas: &mut Ve
                     "tool_use" => "tool_calls",
                     other => other,
                 };
-                deltas.push(StreamDelta::Done { stop_reason: normalized.to_string() });
+                deltas.push(StreamDelta::Done {
+                    stop_reason: normalized.to_string(),
+                });
             }
         }
         Some("ping") | Some("content_block_stop") | Some("message_stop") => {}
@@ -522,7 +550,12 @@ impl StreamFormatter for AnthropicStreamFormatter {
                         delta_ev.to_string(),
                     ));
                 }
-                StreamDelta::ToolCallStart { index: _, id, name } => {
+                StreamDelta::ToolCallStart {
+                    index: _,
+                    id,
+                    name,
+                    thought_signature,
+                } => {
                     self.ensure_message_start(&mut events);
                     self.close_thinking_block_if_open(&mut events);
                     self.close_text_block_if_open(&mut events);
@@ -532,18 +565,29 @@ impl StreamFormatter for AnthropicStreamFormatter {
                     } else {
                         id.clone()
                     };
-                    let block_start = serde_json::json!({
+                    let mut block_start = serde_json::json!({
                         "type": "content_block_start",
                         "index": self.block_index,
                         "content_block": {"type": "tool_use", "id": tool_use_id, "name": name, "input": {}}
                     });
+                    if let Some(signature) = thought_signature
+                        && let Some(content_block) = block_start
+                            .get_mut("content_block")
+                            .and_then(|value| value.as_object_mut())
+                    {
+                        content_block
+                            .insert("thought_signature".into(), serde_json::json!(signature));
+                    }
                     events.push(SseEvent::new(
                         Some("content_block_start"),
                         block_start.to_string(),
                     ));
                     self.in_tool_block = true;
                 }
-                StreamDelta::ToolCallDelta { index: _, arguments } => {
+                StreamDelta::ToolCallDelta {
+                    index: _,
+                    arguments,
+                } => {
                     let delta_ev = serde_json::json!({
                         "type": "content_block_delta",
                         "index": self.block_index,
@@ -599,10 +643,7 @@ impl StreamFormatter for AnthropicStreamFormatter {
                 // Verbatim pass-through for Anthropic server-tool events and any
                 // future event types not yet handled by the codec.
                 StreamDelta::RawEvent { event_type, data } => {
-                    events.push(SseEvent::new(
-                        Some(event_type.as_str()),
-                        data.to_string(),
-                    ));
+                    events.push(SseEvent::new(Some(event_type.as_str()), data.to_string()));
                 }
             }
         }
@@ -767,7 +808,10 @@ mod tests {
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
             .expect("thinking block");
-        assert_eq!(thinking.get("type").and_then(|v| v.as_str()), Some("thinking"));
+        assert_eq!(
+            thinking.get("type").and_then(|v| v.as_str()),
+            Some("thinking")
+        );
         assert_eq!(
             thinking.get("signature").and_then(|v| v.as_str()),
             Some("sig_resp")
@@ -823,8 +867,12 @@ mod tests {
         let mut parser = AnthropicStreamParser::new();
         let deltas = parser.parse_chunk(&sse).unwrap();
 
-        let has_text = deltas.iter().any(|d| matches!(d, StreamDelta::TextDelta(t) if t == "hello"));
-        let has_done = deltas.iter().any(|d| matches!(d, StreamDelta::Done { stop_reason } if stop_reason == "stop"));
+        let has_text = deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::TextDelta(t) if t == "hello"));
+        let has_done = deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::Done { stop_reason } if stop_reason == "stop"));
         assert!(has_text, "expected TextDelta('hello'), got: {deltas:?}");
         assert!(has_done, "expected Done(stop), got: {deltas:?}");
     }
@@ -874,12 +922,26 @@ mod tests {
 
         let reasoning: Vec<_> = deltas
             .iter()
-            .filter_map(|d| if let StreamDelta::ReasoningDelta(t) = d { Some(t.as_str()) } else { None })
+            .filter_map(|d| {
+                if let StreamDelta::ReasoningDelta(t) = d {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
             .collect();
-        assert!(!reasoning.is_empty(), "expected ReasoningDelta events, got: {deltas:?}");
-        assert!(reasoning.contains(&"step one"), "expected 'step one', got: {reasoning:?}");
+        assert!(
+            !reasoning.is_empty(),
+            "expected ReasoningDelta events, got: {deltas:?}"
+        );
+        assert!(
+            reasoning.contains(&"step one"),
+            "expected 'step one', got: {reasoning:?}"
+        );
 
-        let has_text = deltas.iter().any(|d| matches!(d, StreamDelta::TextDelta(t) if t == "answer"));
+        let has_text = deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::TextDelta(t) if t == "answer"));
         assert!(has_text, "expected TextDelta('answer'), got: {deltas:?}");
     }
 
@@ -911,9 +973,13 @@ mod tests {
         assert!(result.is_ok(), "parser must not fail on signature_delta");
 
         let deltas = result.unwrap();
-        let signature = deltas
-            .iter()
-            .find_map(|d| if let StreamDelta::ReasoningSignature(sig) = d { Some(sig.as_str()) } else { None });
+        let signature = deltas.iter().find_map(|d| {
+            if let StreamDelta::ReasoningSignature(sig) = d {
+                Some(sig.as_str())
+            } else {
+                None
+            }
+        });
         assert_eq!(signature, Some("abc123"));
     }
 
@@ -980,7 +1046,10 @@ mod tests {
         let has_done_tool = deltas
             .iter()
             .any(|d| matches!(d, StreamDelta::Done { stop_reason } if stop_reason == "tool_calls"));
-        assert!(has_tool_start, "expected ToolCallStart(get_weather), got: {deltas:?}");
+        assert!(
+            has_tool_start,
+            "expected ToolCallStart(get_weather), got: {deltas:?}"
+        );
         assert!(has_tool_delta, "expected ToolCallDelta, got: {deltas:?}");
         assert!(has_done_tool, "expected Done(tool_calls), got: {deltas:?}");
     }
@@ -1021,7 +1090,10 @@ mod tests {
                 None
             }
         });
-        assert!(raw.is_some(), "expected RawEvent for server_tool_use, got: {deltas:?}");
+        assert!(
+            raw.is_some(),
+            "expected RawEvent for server_tool_use, got: {deltas:?}"
+        );
         let (ev_type, data) = raw.unwrap();
         assert_eq!(ev_type, "content_block_start");
         assert_eq!(
@@ -1042,7 +1114,10 @@ mod tests {
         let deltas = parser.parse_chunk(&sse).unwrap();
 
         let raw = deltas.iter().find(|d| matches!(d, StreamDelta::RawEvent { event_type, .. } if event_type == "web_search_result"));
-        assert!(raw.is_some(), "expected RawEvent for web_search_result, got: {deltas:?}");
+        assert!(
+            raw.is_some(),
+            "expected RawEvent for web_search_result, got: {deltas:?}"
+        );
     }
 
     #[test]
@@ -1089,7 +1164,10 @@ mod tests {
         let deltas = parser.parse_chunk(&sse).unwrap();
 
         let raw = deltas.iter().find(|d| matches!(d, StreamDelta::RawEvent { event_type, .. } if event_type == "content_block_delta"));
-        assert!(raw.is_some(), "expected RawEvent for citations_delta, got: {deltas:?}");
+        assert!(
+            raw.is_some(),
+            "expected RawEvent for citations_delta, got: {deltas:?}"
+        );
     }
 
     // ── Bug-fix ordering tests (Task 0) ──
@@ -1105,8 +1183,12 @@ mod tests {
         let mut parser = AnthropicStreamParser::new();
         let deltas = parser.parse_chunk(&sse).unwrap();
 
-        let usage_pos = deltas.iter().position(|d| matches!(d, StreamDelta::Usage(_)));
-        let start_pos = deltas.iter().position(|d| matches!(d, StreamDelta::MessageStart { .. }));
+        let usage_pos = deltas
+            .iter()
+            .position(|d| matches!(d, StreamDelta::Usage(_)));
+        let start_pos = deltas
+            .iter()
+            .position(|d| matches!(d, StreamDelta::MessageStart { .. }));
         assert!(
             usage_pos.is_some() && start_pos.is_some(),
             "both deltas must be present; got: {deltas:?}",
@@ -1128,8 +1210,12 @@ mod tests {
         let mut parser = AnthropicStreamParser::new();
         let deltas = parser.parse_chunk(&sse).unwrap();
 
-        let usage_pos = deltas.iter().position(|d| matches!(d, StreamDelta::Usage(_)));
-        let done_pos = deltas.iter().position(|d| matches!(d, StreamDelta::Done { .. }));
+        let usage_pos = deltas
+            .iter()
+            .position(|d| matches!(d, StreamDelta::Usage(_)));
+        let done_pos = deltas
+            .iter()
+            .position(|d| matches!(d, StreamDelta::Done { .. }));
         assert!(
             usage_pos.is_some() && done_pos.is_some(),
             "both deltas must be present; got: {deltas:?}",
@@ -1153,7 +1239,13 @@ mod tests {
 
         let usage = deltas
             .iter()
-            .find_map(|d| if let StreamDelta::Usage(u) = d { Some(u) } else { None })
+            .find_map(|d| {
+                if let StreamDelta::Usage(u) = d {
+                    Some(u)
+                } else {
+                    None
+                }
+            })
             .expect("Usage delta must be present");
         assert_eq!(usage.input_tokens, 60, "input_tokens must be 60");
         assert_eq!(usage.output_tokens, 43, "output_tokens must be 43");
@@ -1172,7 +1264,13 @@ mod tests {
 
         let usage = deltas
             .iter()
-            .find_map(|d| if let StreamDelta::Usage(u) = d { Some(u) } else { None })
+            .find_map(|d| {
+                if let StreamDelta::Usage(u) = d {
+                    Some(u)
+                } else {
+                    None
+                }
+            })
             .expect("Usage delta must be present");
         assert_eq!(usage.cache_read_input_tokens, Some(50));
         assert_eq!(usage.cache_creation_input_tokens, Some(200));
@@ -1189,9 +1287,18 @@ mod tests {
 
         let usage = deltas
             .iter()
-            .find_map(|d| if let StreamDelta::Usage(u) = d { Some(u) } else { None })
+            .find_map(|d| {
+                if let StreamDelta::Usage(u) = d {
+                    Some(u)
+                } else {
+                    None
+                }
+            })
             .expect("Usage delta must be present");
-        let stu = usage.server_tool_use.as_ref().expect("server_tool_use must be Some");
+        let stu = usage
+            .server_tool_use
+            .as_ref()
+            .expect("server_tool_use must be Some");
         assert_eq!(stu.web_search_requests, 3);
         assert_eq!(stu.web_fetch_requests, 1);
     }
@@ -1211,7 +1318,10 @@ mod tests {
         let mut formatter = AnthropicStreamFormatter::new();
         let events = formatter.format_deltas(&[
             StreamDelta::Usage(usage),
-            StreamDelta::MessageStart { id: "m1".into(), model: "c".into() },
+            StreamDelta::MessageStart {
+                id: "m1".into(),
+                model: "c".into(),
+            },
         ]);
 
         let start_ev = events
@@ -1219,11 +1329,16 @@ mod tests {
             .find(|e| e.event.as_deref() == Some("message_start"))
             .expect("message_start event must be emitted");
         let json: serde_json::Value = serde_json::from_str(&start_ev.data).unwrap();
-        let u = json.pointer("/message/usage").expect("/message/usage must exist");
+        let u = json
+            .pointer("/message/usage")
+            .expect("/message/usage must exist");
         assert_eq!(u["input_tokens"].as_u64(), Some(100));
         assert_eq!(u["cache_read_input_tokens"].as_u64(), Some(50));
         assert_eq!(u["cache_creation_input_tokens"].as_u64(), Some(200));
-        assert!(u.get("server_tool_use").is_none(), "server_tool_use must be absent when None");
+        assert!(
+            u.get("server_tool_use").is_none(),
+            "server_tool_use must be absent when None"
+        );
     }
 
     #[test]
@@ -1234,13 +1349,21 @@ mod tests {
             output_tokens: 43,
             cache_read_input_tokens: Some(10),
             cache_creation_input_tokens: None,
-            server_tool_use: Some(ServerToolUsage { web_search_requests: 2, web_fetch_requests: 0 }),
+            server_tool_use: Some(ServerToolUsage {
+                web_search_requests: 2,
+                web_fetch_requests: 0,
+            }),
         };
         let mut formatter = AnthropicStreamFormatter::new();
         let events = formatter.format_deltas(&[
             StreamDelta::Usage(usage),
-            StreamDelta::MessageStart { id: "m2".into(), model: "c".into() },
-            StreamDelta::Done { stop_reason: "stop".into() },
+            StreamDelta::MessageStart {
+                id: "m2".into(),
+                model: "c".into(),
+            },
+            StreamDelta::Done {
+                stop_reason: "stop".into(),
+            },
         ]);
 
         let delta_ev = events
@@ -1251,8 +1374,14 @@ mod tests {
         let u = &json["usage"];
         assert_eq!(u["output_tokens"].as_u64(), Some(43));
         assert_eq!(u["cache_read_input_tokens"].as_u64(), Some(10));
-        assert!(u.get("cache_creation_input_tokens").is_none(), "None field must be absent");
-        assert_eq!(u["server_tool_use"]["web_search_requests"].as_u64(), Some(2));
+        assert!(
+            u.get("cache_creation_input_tokens").is_none(),
+            "None field must be absent"
+        );
+        assert_eq!(
+            u["server_tool_use"]["web_search_requests"].as_u64(),
+            Some(2)
+        );
     }
 
     #[test]
@@ -1283,7 +1412,10 @@ mod tests {
         assert_eq!(u["output_tokens"].as_u64(), Some(5));
         assert_eq!(u["cache_read_input_tokens"].as_u64(), Some(3));
         assert_eq!(u["cache_creation_input_tokens"].as_u64(), Some(7));
-        assert_eq!(u["server_tool_use"]["web_search_requests"].as_u64(), Some(1));
+        assert_eq!(
+            u["server_tool_use"]["web_search_requests"].as_u64(),
+            Some(1)
+        );
     }
 
     // ── End-to-end round-trip: ZhipuAI pattern (Task 0 + Task 2) ──

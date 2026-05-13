@@ -21,18 +21,32 @@ impl ResponseParser for GoogleResponseParser {
         let mut text = String::new();
         let mut tool_calls = Vec::new();
 
-        if let Some(parts) = content_obj.and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+        if let Some(parts) = content_obj
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+        {
             for part in parts {
                 if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
                     text.push_str(t);
                 }
                 if let Some(fc) = part.get("functionCall") {
-                    let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                    let args = fc.get("args").cloned().unwrap_or(Value::Object(Default::default()));
+                    let name = fc
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let args = fc
+                        .get("args")
+                        .cloned()
+                        .unwrap_or(Value::Object(Default::default()));
                     tool_calls.push(ToolCall {
                         id: format!("call_{}", uuid::Uuid::new_v4().simple()),
                         name,
                         arguments: args.to_string(),
+                        thought_signature: fc
+                            .get("thoughtSignature")
+                            .and_then(|value| value.as_str())
+                            .map(ToOwned::to_owned),
                     });
                 }
             }
@@ -84,8 +98,14 @@ impl ResponseFormatter for GoogleResponseFormatter {
         for tc in &resp.tool_calls {
             let args: Value =
                 serde_json::from_str(&tc.arguments).unwrap_or(Value::Object(Default::default()));
+            let mut function_call = serde_json::json!({"name": tc.name, "args": args});
+            if let Some(signature) = tc.thought_signature.as_ref()
+                && let Some(obj) = function_call.as_object_mut()
+            {
+                obj.insert("thoughtSignature".into(), serde_json::json!(signature));
+            }
             parts.push(serde_json::json!({
-                "functionCall": {"name": tc.name, "args": args}
+                "functionCall": function_call
             }));
         }
 
@@ -189,9 +209,10 @@ fn parse_gemini_chunk(chunk: &Value, deltas: &mut Vec<StreamDelta>, first: &mut 
     {
         for part in parts {
             if let Some(text) = part.get("text").and_then(|t| t.as_str())
-                && !text.is_empty() {
-                    deltas.push(StreamDelta::TextDelta(text.to_string()));
-                }
+                && !text.is_empty()
+            {
+                deltas.push(StreamDelta::TextDelta(text.to_string()));
+            }
             if let Some(fc) = part.get("functionCall") {
                 let name = fc
                     .get("name")
@@ -203,11 +224,12 @@ fn parse_gemini_chunk(chunk: &Value, deltas: &mut Vec<StreamDelta>, first: &mut 
                     index: 0,
                     id,
                     name: name.clone(),
+                    thought_signature: fc
+                        .get("thoughtSignature")
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned),
                 });
-                let args = fc
-                    .get("args")
-                    .map(|a| a.to_string())
-                    .unwrap_or_default();
+                let args = fc.get("args").map(|a| a.to_string()).unwrap_or_default();
                 if !args.is_empty() && args != "{}" {
                     deltas.push(StreamDelta::ToolCallDelta {
                         index: 0,
@@ -292,7 +314,12 @@ impl StreamFormatter for GoogleStreamFormatter {
                     });
                     events.push(SseEvent::new(None, chunk.to_string()));
                 }
-                StreamDelta::ToolCallStart { index, id: _, name } => {
+                StreamDelta::ToolCallStart {
+                    index,
+                    id: _,
+                    name,
+                    thought_signature: _,
+                } => {
                     self.tool_names.insert(*index, name.clone());
                     self.tool_arg_buffers.insert(*index, String::new());
                 }
@@ -300,10 +327,7 @@ impl StreamFormatter for GoogleStreamFormatter {
                     let Some(name) = self.tool_names.get(index).cloned() else {
                         continue;
                     };
-                    let buf = self
-                        .tool_arg_buffers
-                        .entry(*index)
-                        .or_default();
+                    let buf = self.tool_arg_buffers.entry(*index).or_default();
                     buf.push_str(arguments);
                     let Ok(args) = serde_json::from_str::<Value>(buf) else {
                         continue;

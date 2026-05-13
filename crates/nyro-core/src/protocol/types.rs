@@ -137,6 +137,8 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,16 +167,32 @@ pub enum ResponseItem {
 
 #[derive(Debug, Clone)]
 pub enum StreamDelta {
-    MessageStart { id: String, model: String },
+    MessageStart {
+        id: String,
+        model: String,
+    },
     ReasoningDelta(String),
     ReasoningSignature(String),
     TextDelta(String),
-    ToolCallStart { index: usize, id: String, name: String },
-    ToolCallDelta { index: usize, arguments: String },
+    ToolCallStart {
+        index: usize,
+        id: String,
+        name: String,
+        thought_signature: Option<String>,
+    },
+    ToolCallDelta {
+        index: usize,
+        arguments: String,
+    },
     Usage(TokenUsage),
-    Done { stop_reason: String },
+    Done {
+        stop_reason: String,
+    },
     /// A verbatim SSE event that was not classified into a known delta type.
     /// Forwarded as-is by same-protocol formatters so no upstream data is silently dropped.
     /// Other formatters (e.g. OpenAI, Google) ignore it.
-    RawEvent { event_type: String, data: Value },
+    RawEvent {
+        event_type: String,
+        data: Value,
+    },
 }

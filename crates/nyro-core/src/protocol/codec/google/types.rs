@@ -87,6 +87,8 @@ pub struct GoogleFileData {
 pub struct GoogleFunctionCall {
     pub name: String,
     pub args: Value,
+    #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

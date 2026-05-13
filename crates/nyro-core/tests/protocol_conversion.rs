@@ -1,9 +1,11 @@
-use nyro_core::protocol::codec::anthropic::stream::AnthropicResponseFormatter;
 use nyro_core::protocol::codec::anthropic::decoder::AnthropicDecoder;
 use nyro_core::protocol::codec::anthropic::encoder::AnthropicEncoder;
+use nyro_core::protocol::codec::anthropic::stream::AnthropicResponseFormatter;
+use nyro_core::protocol::codec::anthropic::stream::AnthropicStreamFormatter;
 use nyro_core::protocol::codec::google::encoder::GoogleEncoder;
-use nyro_core::protocol::codec::google::stream::GoogleStreamFormatter;
-use nyro_core::protocol::codec::openai::stream::OpenAIStreamFormatter;
+use nyro_core::protocol::codec::google::stream::{
+    GoogleResponseParser, GoogleStreamFormatter, GoogleStreamParser,
+};
 use nyro_core::protocol::codec::openai::encoder::OpenAIEncoder;
 use nyro_core::protocol::codec::openai::responses::decoder::ResponsesDecoder;
 use nyro_core::protocol::codec::openai::responses::encoder::ResponsesEncoder;
@@ -11,16 +13,16 @@ use nyro_core::protocol::codec::openai::responses::formatter::ResponsesResponseF
 use nyro_core::protocol::codec::openai::responses::parser::{
     ResponsesResponseParser, ResponsesStreamParser,
 };
+use nyro_core::protocol::codec::openai::stream::OpenAIStreamFormatter;
 use nyro_core::protocol::codec::reasoning::normalize_response_reasoning;
 use nyro_core::protocol::codec::tool_correlation::normalize_request_tool_results;
-use nyro_core::protocol::ir::AiRequest;
-use nyro_core::protocol::types::{
-    ContentBlock, InternalMessage, InternalRequest, InternalResponse, MessageContent, ResponseItem, Role,
-    StreamDelta,
-    TokenUsage, ToolCall, ToolDef,
-};
 use nyro_core::protocol::ids::{
     ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GENERATE_V1BETA, OPENAI_CHAT_V1, OPENAI_RESPONSES_V1,
+};
+use nyro_core::protocol::ir::AiRequest;
+use nyro_core::protocol::types::{
+    ContentBlock, InternalMessage, InternalRequest, InternalResponse, MessageContent, ResponseItem,
+    Role, StreamDelta, TokenUsage, ToolCall, ToolDef,
 };
 use nyro_core::protocol::{
     EgressEncoder, IngressDecoder, ResponseFormatter, ResponseParser, StreamFormatter, StreamParser,
@@ -49,7 +51,10 @@ fn openai_to_anthropic_thinking_blocks() {
         .get("content")
         .and_then(|v| v.as_array())
         .expect("content should be array");
-    assert_eq!(content[0].get("type").and_then(|v| v.as_str()), Some("thinking"));
+    assert_eq!(
+        content[0].get("type").and_then(|v| v.as_str()),
+        Some("thinking")
+    );
     assert_eq!(
         content[0].get("thinking").and_then(|v| v.as_str()),
         Some("reasoning summary")
@@ -72,6 +77,7 @@ fn ir_compat_preserves_per_message_reasoning_extra() {
                 id: "call_1".to_string(),
                 name: "exec_command".to_string(),
                 arguments: "{\"cmd\":\"echo hello\"}".to_string(),
+                thought_signature: None,
             }]),
             tool_call_id: None,
             extra,
@@ -115,6 +121,7 @@ fn anthropic_encoder_replays_reasoning_extra_as_thinking_block() {
                 id: "call_1".to_string(),
                 name: "exec_command".to_string(),
                 arguments: "{\"cmd\":\"echo hello\"}".to_string(),
+                thought_signature: None,
             }]),
             tool_call_id: None,
             extra,
@@ -157,6 +164,7 @@ fn openai_to_responses_reasoning_and_function_call_items() {
             id: "call_123".to_string(),
             name: "ls".to_string(),
             arguments: "{\"path\":\".\"}".to_string(),
+            thought_signature: None,
         }],
         response_items: Some(vec![
             ResponseItem::Reasoning {
@@ -209,6 +217,7 @@ fn openai_formatter_sets_tool_calls_finish_reason_when_tool_calls_present() {
             id: "call_1".to_string(),
             name: "bash".to_string(),
             arguments: "{\"command\":\"ls\"}".to_string(),
+            thought_signature: None,
         }],
         response_items: None,
         stop_reason: Some("stop".to_string()),
@@ -219,7 +228,8 @@ fn openai_formatter_sets_tool_calls_finish_reason_when_tool_calls_present() {
         },
     };
 
-    let out = nyro_core::protocol::codec::openai::stream::OpenAIResponseFormatter.format_response(&resp);
+    let out =
+        nyro_core::protocol::codec::openai::stream::OpenAIResponseFormatter.format_response(&resp);
     let finish_reason = out
         .get("choices")
         .and_then(|v| v.as_array())
@@ -241,6 +251,7 @@ fn openai_stream_formatter_sets_tool_calls_finish_reason_when_tool_calls_seen() 
             index: 0,
             id: "call_1".to_string(),
             name: "bash".to_string(),
+            thought_signature: None,
         },
         StreamDelta::ToolCallDelta {
             index: 0,
@@ -275,6 +286,7 @@ fn gemini_tool_result_correlation_success() {
                     id: "call_abc".to_string(),
                     name: "read_file".to_string(),
                     arguments: "{\"path\":\"src/main.rs\"}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -321,11 +333,13 @@ fn gemini_tool_result_id_hint_matches_out_of_order_calls() {
                         id: "call_a".to_string(),
                         name: "Glob".to_string(),
                         arguments: "{}".to_string(),
+                        thought_signature: None,
                     },
                     ToolCall {
                         id: "call_b".to_string(),
                         name: "Bash".to_string(),
                         arguments: "{}".to_string(),
+                        thought_signature: None,
                     },
                 ]),
                 tool_call_id: None,
@@ -436,7 +450,9 @@ fn anthropic_tool_result_decodes_to_tool_role() {
         ]
     });
 
-    let req = AnthropicDecoder.decode_request(body).expect("decode anthropic request");
+    let req = AnthropicDecoder
+        .decode_request(body)
+        .expect("decode anthropic request");
     assert_eq!(req.messages.len(), 2);
     assert_eq!(req.messages[1].role, Role::Tool);
     assert_eq!(req.messages[1].tool_call_id.as_deref(), Some("call_abc"));
@@ -464,7 +480,9 @@ fn anthropic_multi_tool_result_decodes_to_multiple_tool_messages() {
             }
         ]
     });
-    let req = AnthropicDecoder.decode_request(body).expect("decode anthropic request");
+    let req = AnthropicDecoder
+        .decode_request(body)
+        .expect("decode anthropic request");
     assert_eq!(req.messages.len(), 3);
     assert_eq!(req.messages[1].role, Role::Tool);
     assert_eq!(req.messages[2].role, Role::Tool);
@@ -528,6 +546,120 @@ fn anthropic_thinking_block_round_trips_with_signature() {
 }
 
 #[test]
+fn gemini_tool_use_thought_signature_round_trips_via_anthropic_history() {
+    let google_resp = serde_json::json!({
+        "modelVersion": "gemini-2.5-pro",
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{
+                    "functionCall": {
+                        "name": "default_api:Grep",
+                        "args": {"pattern": "todo"},
+                        "thoughtSignature": "sig_tool_123"
+                    }
+                }]
+            },
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 10,
+            "candidatesTokenCount": 5,
+            "totalTokenCount": 15
+        }
+    });
+
+    let internal = GoogleResponseParser
+        .parse_response(google_resp)
+        .expect("parse google response");
+    assert_eq!(
+        internal.tool_calls[0].thought_signature.as_deref(),
+        Some("sig_tool_123")
+    );
+
+    let anthropic_resp = AnthropicResponseFormatter.format_response(&internal);
+    let tool_use_block = anthropic_resp["content"]
+        .as_array()
+        .and_then(|blocks| blocks.first())
+        .expect("tool_use block");
+    assert_eq!(tool_use_block["type"].as_str(), Some("tool_use"));
+    assert_eq!(
+        tool_use_block["thought_signature"].as_str(),
+        Some("sig_tool_123")
+    );
+
+    let anthropic_request = serde_json::json!({
+        "model": "claude-sonnet",
+        "max_tokens": 1024,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": anthropic_resp["content"].clone()
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_block["id"].clone(),
+                        "content": {"matches": ["todo"]}
+                    },
+                    {
+                        "type": "text",
+                        "text": "continue"
+                    }
+                ]
+            }
+        ]
+    });
+
+    let decoded = AnthropicDecoder
+        .decode_request(anthropic_request)
+        .expect("decode anthropic request");
+    let assistant_msg = decoded
+        .messages
+        .iter()
+        .find(|message| message.role == Role::Assistant)
+        .expect("assistant tool_use message");
+    assert_eq!(
+        assistant_msg
+            .tool_calls
+            .as_ref()
+            .and_then(|calls| calls.first())
+            .and_then(|call| call.thought_signature.as_deref()),
+        Some("sig_tool_123")
+    );
+
+    let (google_body, _) = GoogleEncoder
+        .encode_request(&decoded)
+        .expect("encode google request");
+    let encoded_signature =
+        google_body["contents"][0]["parts"][0]["functionCall"]["thoughtSignature"].as_str();
+    assert_eq!(encoded_signature, Some("sig_tool_123"));
+}
+
+#[test]
+fn gemini_stream_tool_use_thought_signature_reaches_anthropic_client() {
+    let sse = "data: {\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"default_api:Grep\",\"args\":{\"pattern\":\"todo\"},\"thoughtSignature\":\"sig_stream_1\"}}]}}]}\n\n";
+
+    let mut parser = GoogleStreamParser::new();
+    let deltas = parser.parse_chunk(sse).expect("parse google stream");
+
+    let mut formatter = AnthropicStreamFormatter::new();
+    let events = formatter.format_deltas(&deltas);
+    let tool_use_start = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("content_block_start"))
+        .expect("tool_use content_block_start");
+    let payload: serde_json::Value =
+        serde_json::from_str(&tool_use_start.data).expect("parse anthropic event");
+    assert_eq!(
+        payload["content_block"]["thought_signature"].as_str(),
+        Some("sig_stream_1")
+    );
+}
+
+#[test]
 fn openai_encoder_injects_synthetic_tool_call_before_orphan_tool_result() {
     let req = InternalRequest {
         messages: vec![InternalMessage {
@@ -560,7 +692,10 @@ fn openai_encoder_injects_synthetic_tool_call_before_orphan_tool_result() {
         messages[0].get("role").and_then(|v| v.as_str()),
         Some("assistant")
     );
-    assert_eq!(messages[1].get("role").and_then(|v| v.as_str()), Some("tool"));
+    assert_eq!(
+        messages[1].get("role").and_then(|v| v.as_str()),
+        Some("tool")
+    );
     assert_eq!(
         messages[1].get("tool_call_id").and_then(|v| v.as_str()),
         Some("call_orphan_1")
@@ -578,6 +713,7 @@ fn openai_encoder_injects_adjacent_tool_call_for_non_adjacent_match() {
                     id: "call_x".to_string(),
                     name: "ls".to_string(),
                     arguments: "{}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -621,7 +757,10 @@ fn openai_encoder_injects_adjacent_tool_call_for_non_adjacent_match() {
         messages[2].get("role").and_then(|v| v.as_str()),
         Some("assistant")
     );
-    assert_eq!(messages[3].get("role").and_then(|v| v.as_str()), Some("tool"));
+    assert_eq!(
+        messages[3].get("role").and_then(|v| v.as_str()),
+        Some("tool")
+    );
     let tool_id = messages[3]
         .get("tool_call_id")
         .and_then(|v| v.as_str())
@@ -648,6 +787,7 @@ fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
                     id: "call_keep".to_string(),
                     name: "exec_command".to_string(),
                     arguments: "{\"command\":\"ls -la\"}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -688,7 +828,10 @@ fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
 
     // intermediate assistant text should be dropped to keep tool_result adjacent
     assert_eq!(messages.len(), 3);
-    assert_eq!(messages[0].get("role").and_then(|v| v.as_str()), Some("assistant"));
+    assert_eq!(
+        messages[0].get("role").and_then(|v| v.as_str()),
+        Some("assistant")
+    );
     assert_eq!(
         messages[1]
             .get("tool_calls")
@@ -698,7 +841,10 @@ fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
             .and_then(|v| v.as_str()),
         Some("call_keep")
     );
-    assert_eq!(messages[2].get("role").and_then(|v| v.as_str()), Some("tool"));
+    assert_eq!(
+        messages[2].get("role").and_then(|v| v.as_str()),
+        Some("tool")
+    );
     assert_eq!(
         messages[2].get("tool_call_id").and_then(|v| v.as_str()),
         Some("call_keep")
@@ -716,6 +862,7 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
                     id: "call_dup".to_string(),
                     name: "exec_command".to_string(),
                     arguments: "{}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -727,6 +874,7 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
                     id: "call_dup".to_string(),
                     name: "exec_command".to_string(),
                     arguments: "{}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -767,7 +915,11 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
 
     let ids: Vec<String> = messages
         .iter()
-        .filter_map(|m| m.get("tool_calls").and_then(|v| v.as_array()).and_then(|arr| arr.first()))
+        .filter_map(|m| {
+            m.get("tool_calls")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+        })
         .filter_map(|tc| tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .collect();
     assert_eq!(ids.len(), 2);
@@ -776,7 +928,11 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
     let tool_ids: Vec<String> = messages
         .iter()
         .filter(|m| m.get("role").and_then(|v| v.as_str()) == Some("tool"))
-        .filter_map(|m| m.get("tool_call_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter_map(|m| {
+            m.get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     assert_eq!(tool_ids.len(), 2);
     assert!(ids.contains(&tool_ids[0]));
@@ -896,6 +1052,7 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
                     id: "call_1".to_string(),
                     name: "exec_command".to_string(),
                     arguments: "{}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -928,7 +1085,10 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
         .expect("messages array");
     assert_eq!(msgs.len(), 3);
     assert_eq!(msgs[0].get("role").and_then(|v| v.as_str()), Some("user"));
-    assert_eq!(msgs[1].get("role").and_then(|v| v.as_str()), Some("assistant"));
+    assert_eq!(
+        msgs[1].get("role").and_then(|v| v.as_str()),
+        Some("assistant")
+    );
     assert_eq!(msgs[2].get("role").and_then(|v| v.as_str()), Some("user"));
 
     let first_blocks = msgs[0]
@@ -957,6 +1117,7 @@ fn anthropic_encoder_normalizes_tool_use_ids_for_tool_and_result() {
                     id: "call_function_abc_1".to_string(),
                     name: "glob".to_string(),
                     arguments: "{}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -987,7 +1148,9 @@ fn anthropic_encoder_normalizes_tool_use_ids_for_tool_and_result() {
         extra: Default::default(),
     };
 
-    let (body, _) = AnthropicEncoder.encode_request(&req).expect("encode anthropic body");
+    let (body, _) = AnthropicEncoder
+        .encode_request(&req)
+        .expect("encode anthropic body");
     let msgs = body
         .get("messages")
         .and_then(|v| v.as_array())
@@ -1046,6 +1209,7 @@ fn openai_encoder_remaps_reused_tool_result_id_with_synthetic_adjacent_call() {
                     id: "call_same".to_string(),
                     name: "exec_command".to_string(),
                     arguments: "{}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -1120,11 +1284,13 @@ fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
                         id: "call_a".to_string(),
                         name: "Glob".to_string(),
                         arguments: "{}".to_string(),
+                        thought_signature: None,
                     },
                     ToolCall {
                         id: "call_b".to_string(),
                         name: "Bash".to_string(),
                         arguments: "{}".to_string(),
+                        thought_signature: None,
                     },
                 ]),
                 tool_call_id: None,
@@ -1166,12 +1332,24 @@ fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
         .and_then(|v| v.as_array())
         .expect("messages");
     assert_eq!(msgs.len(), 4);
-    assert_eq!(msgs[0].get("role").and_then(|v| v.as_str()), Some("assistant"));
+    assert_eq!(
+        msgs[0].get("role").and_then(|v| v.as_str()),
+        Some("assistant")
+    );
     assert_eq!(msgs[1].get("role").and_then(|v| v.as_str()), Some("tool"));
-    assert_eq!(msgs[2].get("role").and_then(|v| v.as_str()), Some("assistant"));
+    assert_eq!(
+        msgs[2].get("role").and_then(|v| v.as_str()),
+        Some("assistant")
+    );
     assert_eq!(msgs[3].get("role").and_then(|v| v.as_str()), Some("tool"));
-    let id1 = msgs[1].get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("");
-    let id2 = msgs[3].get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("");
+    let id1 = msgs[1]
+        .get("tool_call_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let id2 = msgs[3]
+        .get("tool_call_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let prev1 = msgs[0]
         .get("tool_calls")
         .and_then(|v| v.as_array())
@@ -1223,11 +1401,13 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
                         id: "call_tokyo".to_string(),
                         name: "get_time".to_string(),
                         arguments: "{\"location\":\"Tokyo\"}".to_string(),
+                        thought_signature: None,
                     },
                     ToolCall {
                         id: "call_paris".to_string(),
                         name: "get_time".to_string(),
                         arguments: "{\"location\":\"Paris\"}".to_string(),
+                        thought_signature: None,
                     },
                 ]),
                 tool_call_id: None,
@@ -1263,7 +1443,9 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
         extra: Default::default(),
     };
 
-    let (body, _) = OpenAIEncoder.encode_request(&req).expect("encode openai body");
+    let (body, _) = OpenAIEncoder
+        .encode_request(&req)
+        .expect("encode openai body");
     let msgs = body
         .get("messages")
         .and_then(|v| v.as_array())
@@ -1272,7 +1454,11 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
     // We expect: [user, assistant(call_tokyo, reasoning_content), tool(call_tokyo),
     //             assistant(call_paris, reasoning_content), tool(call_paris)]
     // The original assistant with both calls gets pruned (empty content, no calls left).
-    assert_eq!(msgs.len(), 5, "expected 5 messages: user + 2 assistant+tool pairs");
+    assert_eq!(
+        msgs.len(),
+        5,
+        "expected 5 messages: user + 2 assistant+tool pairs"
+    );
 
     // Every assistant message must carry reasoning_content
     for (i, msg) in msgs.iter().enumerate() {
@@ -1284,12 +1470,14 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
                 "assistant message at index {} is missing reasoning_content. \
                  Bug: std::mem::take() on source.extra drops it after first extraction. \
                  Full msg: {:?}",
-                i, msg
+                i,
+                msg
             );
             assert_eq!(
                 rc,
                 Some("I need to check the time in Tokyo and Paris."),
-                "assistant[{}] has wrong reasoning_content value", i
+                "assistant[{}] has wrong reasoning_content value",
+                i
             );
         }
     }
@@ -1314,11 +1502,13 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
                         id: "call_old_1".to_string(),
                         name: String::new(),
                         arguments: "{}".to_string(),
+                        thought_signature: None,
                     },
                     ToolCall {
                         id: "call_old_2".to_string(),
                         name: "list_directory".to_string(),
                         arguments: "{}".to_string(),
+                        thought_signature: None,
                     },
                 ]),
                 tool_call_id: None,
@@ -1331,6 +1521,7 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
                     id: "call_new".to_string(),
                     name: "glob".to_string(),
                     arguments: "{}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -1365,7 +1556,10 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
         .expect("messages");
     assert_eq!(msgs.len(), 3);
     assert_eq!(msgs[0].get("role").and_then(|v| v.as_str()), Some("system"));
-    assert_eq!(msgs[1].get("role").and_then(|v| v.as_str()), Some("assistant"));
+    assert_eq!(
+        msgs[1].get("role").and_then(|v| v.as_str()),
+        Some("assistant")
+    );
     assert_eq!(msgs[2].get("role").and_then(|v| v.as_str()), Some("tool"));
     let call_id = msgs[1]
         .get("tool_calls")
@@ -1389,6 +1583,7 @@ fn gemini_stream_formatter_keeps_tool_name_for_argument_deltas() {
             index: 0,
             id: "call_1".to_string(),
             name: "run_shell_command".to_string(),
+            thought_signature: None,
         },
         StreamDelta::ToolCallDelta {
             index: 0,
@@ -1441,6 +1636,7 @@ fn gemini_stream_formatter_normalizes_common_tool_argument_aliases() {
             index: 0,
             id: "call_1".to_string(),
             name: "glob".to_string(),
+            thought_signature: None,
         },
         StreamDelta::ToolCallDelta {
             index: 0,
@@ -1464,13 +1660,16 @@ fn gemini_stream_formatter_normalizes_common_tool_argument_aliases() {
         })
         .expect("functionCall payload");
 
-    assert_eq!(
-        payload.get("name").and_then(|v| v.as_str()),
-        Some("glob")
-    );
+    assert_eq!(payload.get("name").and_then(|v| v.as_str()), Some("glob"));
     let args = payload.get("args").expect("args object");
-    assert_eq!(args.get("pattern").and_then(|v| v.as_str()), Some("**/*.py"));
-    assert_eq!(args.get("root_dir").and_then(|v| v.as_str()), Some("/tmp/work"));
+    assert_eq!(
+        args.get("pattern").and_then(|v| v.as_str()),
+        Some("**/*.py")
+    );
+    assert_eq!(
+        args.get("root_dir").and_then(|v| v.as_str()),
+        Some("/tmp/work")
+    );
     assert_eq!(
         args.get("exclude_patterns")
             .and_then(|v| v.as_array())
@@ -1650,7 +1849,10 @@ fn responses_encoder_splits_system_to_instructions_and_user_to_input_text() {
     );
     let input = body.get("input").and_then(|v| v.as_array()).expect("input");
     assert_eq!(input.len(), 1);
-    assert_eq!(input[0].get("type").and_then(|v| v.as_str()), Some("message"));
+    assert_eq!(
+        input[0].get("type").and_then(|v| v.as_str()),
+        Some("message")
+    );
     assert_eq!(input[0].get("role").and_then(|v| v.as_str()), Some("user"));
     let first_block = input[0]
         .get("content")
@@ -1675,6 +1877,7 @@ fn responses_encoder_emits_function_call_and_function_call_output_items() {
                     id: "call_abc".to_string(),
                     name: "list_dir".to_string(),
                     arguments: "{\"path\":\".\"}".to_string(),
+                    thought_signature: None,
                 }]),
                 tool_call_id: None,
                 extra: Default::default(),
@@ -1692,7 +1895,11 @@ fn responses_encoder_emits_function_call_and_function_call_output_items() {
 
     let (body, _) = ResponsesEncoder.encode_request(&req).expect("encode");
     let input = body.get("input").and_then(|v| v.as_array()).expect("input");
-    assert_eq!(input.len(), 2, "one function_call + one function_call_output");
+    assert_eq!(
+        input.len(),
+        2,
+        "one function_call + one function_call_output"
+    );
 
     assert_eq!(
         input[0].get("type").and_then(|v| v.as_str()),
@@ -1850,9 +2057,7 @@ fn responses_response_parser_extracts_text_tool_calls_and_usage() {
         "usage": {"input_tokens": 11, "output_tokens": 3}
     });
 
-    let resp = ResponsesResponseParser
-        .parse_response(body)
-        .expect("parse");
+    let resp = ResponsesResponseParser.parse_response(body).expect("parse");
 
     assert_eq!(resp.id, "resp_42");
     assert_eq!(resp.model, "gpt-5.4");
@@ -1935,7 +2140,9 @@ fn codex_parallel_calls_with_intermediate_text_anthropic_egress() {
             .iter()
             .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
             .filter_map(|b| {
-                b.get("tool_use_id").and_then(|v| v.as_str()).map(String::from)
+                b.get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
             })
             .collect();
         for id in &tool_use_ids {

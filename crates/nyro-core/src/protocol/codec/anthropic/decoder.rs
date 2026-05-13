@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::protocol::IngressDecoder;
+use crate::protocol::codec::tool_metadata::append_google_tool_call_metadata;
 use crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use crate::protocol::types::*;
 
@@ -19,7 +20,9 @@ impl IngressDecoder for AnthropicDecoder {
         // encoder can round-trip them faithfully.
         let needs_raw_msgs = req.messages.iter().any(|m| {
             if let AnthropicContent::Blocks(blocks) = &m.content {
-                blocks.iter().any(|b| b.cache_control().is_some() || b.is_exotic())
+                blocks
+                    .iter()
+                    .any(|b| b.cache_control().is_some() || b.is_exotic())
             } else {
                 false
             }
@@ -45,12 +48,16 @@ impl IngressDecoder for AnthropicDecoder {
             None
         };
         let raw_system: Option<Value> = if needs_raw_system {
-            req.system.as_ref().and_then(|s| serde_json::to_value(s).ok())
+            req.system
+                .as_ref()
+                .and_then(|s| serde_json::to_value(s).ok())
         } else {
             None
         };
         let raw_tools: Option<Value> = if needs_raw_tools {
-            req.tools.as_ref().and_then(|t| serde_json::to_value(t).ok())
+            req.tools
+                .as_ref()
+                .and_then(|t| serde_json::to_value(t).ok())
         } else {
             None
         };
@@ -100,9 +107,7 @@ impl IngressDecoder for AnthropicDecoder {
                         return Some(ToolDef {
                             name: format!("__builtin__{}", tool_type),
                             description: t.description,
-                            parameters: t
-                                .input_schema
-                                .unwrap_or(Value::Object(Default::default())),
+                            parameters: t.input_schema.unwrap_or(Value::Object(Default::default())),
                         });
                     }
                     t.input_schema.map(|schema| ToolDef {
@@ -129,13 +134,15 @@ impl IngressDecoder for AnthropicDecoder {
 
         // PR-10 named extra fields ─────────────────────────────────────────────
         if let Some(thinking) = req.thinking
-            && let Ok(v) = serde_json::to_value(&thinking) {
-                extra.insert("__anthropic_thinking".into(), v);
-            }
+            && let Ok(v) = serde_json::to_value(&thinking)
+        {
+            extra.insert("__anthropic_thinking".into(), v);
+        }
         if let Some(cm) = req.context_management
-            && let Ok(v) = serde_json::to_value(&cm) {
-                extra.insert("__anthropic_context_management".into(), v);
-            }
+            && let Ok(v) = serde_json::to_value(&cm)
+        {
+            extra.insert("__anthropic_context_management".into(), v);
+        }
         if let Some(c) = req.container {
             extra.insert("__anthropic_container".into(), Value::String(c));
         }
@@ -146,9 +153,10 @@ impl IngressDecoder for AnthropicDecoder {
             extra.insert("__anthropic_metadata".into(), meta);
         }
         if let Some(stops) = req.stop_sequences
-            && let Ok(v) = serde_json::to_value(&stops) {
-                extra.insert("__anthropic_stop_sequences".into(), v);
-            }
+            && let Ok(v) = serde_json::to_value(&stops)
+        {
+            extra.insert("__anthropic_stop_sequences".into(), v);
+        }
         if let Some(k) = req.top_k {
             extra.insert("__anthropic_top_k".into(), Value::Number(k.into()));
         }
@@ -178,18 +186,20 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<InternalMessage>> {
     };
 
     if role == Role::User
-        && let AnthropicContent::Blocks(blocks) = msg.content {
-            return decode_user_blocks(blocks);
-        }
+        && let AnthropicContent::Blocks(blocks) = msg.content
+    {
+        return decode_user_blocks(blocks);
+    }
 
-    let (content, tool_calls, tool_call_id) = match msg.content {
-        AnthropicContent::Text(t) => (MessageContent::Text(t), None, None),
+    let (content, tool_calls, tool_call_id, extra) = match msg.content {
+        AnthropicContent::Text(t) => (MessageContent::Text(t), None, None, Default::default()),
         AnthropicContent::Blocks(blocks) => {
             let mut content_blocks = Vec::new();
             let mut tcs = Vec::new();
             let mut tc_id = None;
+            let mut extra: std::collections::HashMap<String, Value> = Default::default();
 
-            for block in blocks {
+            for (index, block) in blocks.into_iter().enumerate() {
                 match block {
                     AnthropicContentBlock::Text { text, .. } => {
                         content_blocks.push(ContentBlock::Text { text });
@@ -212,11 +222,25 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<InternalMessage>> {
                             },
                         });
                     }
-                    AnthropicContentBlock::ToolUse { id, name, input, .. } => {
+                    AnthropicContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        thought_signature,
+                        ..
+                    } => {
+                        append_google_tool_call_metadata(
+                            &mut extra,
+                            index,
+                            &id,
+                            &name,
+                            thought_signature.as_deref(),
+                        );
                         tcs.push(ToolCall {
                             id: id.clone(),
                             name: name.clone(),
                             arguments: input.to_string(),
+                            thought_signature: thought_signature.clone(),
                         });
                         content_blocks.push(ContentBlock::ToolUse { id, name, input });
                     }
@@ -233,8 +257,7 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<InternalMessage>> {
                     }
                     AnthropicContentBlock::Document { title, .. } => {
                         // Best-effort IR representation; encoder uses raw bytes.
-                        let text = title
-                            .unwrap_or_else(|| "[document]".to_string());
+                        let text = title.unwrap_or_else(|| "[document]".to_string());
                         content_blocks.push(ContentBlock::Text { text });
                     }
                     AnthropicContentBlock::InputAudio { .. } => {
@@ -248,20 +271,22 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<InternalMessage>> {
             let tool_calls_opt = if tcs.is_empty() { None } else { Some(tcs) };
 
             if content_blocks.len() == 1
-                && let ContentBlock::Text { text } = &content_blocks[0] {
-                    return Ok(vec![InternalMessage {
-                        role,
-                        content: MessageContent::Text(text.clone()),
-                        tool_calls: tool_calls_opt,
-                        tool_call_id: tc_id,
-                        extra: Default::default(),
-                    }]);
-                }
+                && let ContentBlock::Text { text } = &content_blocks[0]
+            {
+                return Ok(vec![InternalMessage {
+                    role,
+                    content: MessageContent::Text(text.clone()),
+                    tool_calls: tool_calls_opt,
+                    tool_call_id: tc_id,
+                    extra,
+                }]);
+            }
 
             (
                 MessageContent::Blocks(content_blocks),
                 tool_calls_opt,
                 tc_id,
+                extra,
             )
         }
     };
@@ -271,15 +296,16 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<InternalMessage>> {
         content,
         tool_calls,
         tool_call_id,
-        extra: Default::default(),
+        extra,
     }])
 }
 
 fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<InternalMessage>> {
     let mut messages: Vec<InternalMessage> = Vec::new();
     let mut user_blocks: Vec<ContentBlock> = Vec::new();
+    let mut extra: std::collections::HashMap<String, Value> = Default::default();
 
-    for block in blocks {
+    for (index, block) in blocks.into_iter().enumerate() {
         match block {
             AnthropicContentBlock::ToolResult {
                 tool_use_id,
@@ -310,27 +336,34 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<Internal
                 text: thinking,
                 signature,
             }),
-            AnthropicContentBlock::Image { source, .. } => {
-                user_blocks.push(ContentBlock::Image {
-                    source: ImageSource {
-                        media_type: source.media_type.unwrap_or_default(),
-                        data: source.data.unwrap_or_default(),
-                    },
-                })
-            }
-            AnthropicContentBlock::ToolUse { id, name, input, .. } => {
+            AnthropicContentBlock::Image { source, .. } => user_blocks.push(ContentBlock::Image {
+                source: ImageSource {
+                    media_type: source.media_type.unwrap_or_default(),
+                    data: source.data.unwrap_or_default(),
+                },
+            }),
+            AnthropicContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                thought_signature,
+                ..
+            } => {
+                append_google_tool_call_metadata(
+                    &mut extra,
+                    index,
+                    &id,
+                    &name,
+                    thought_signature.as_deref(),
+                );
                 user_blocks.push(ContentBlock::ToolUse { id, name, input })
             }
-            AnthropicContentBlock::Document { title, .. } => {
-                user_blocks.push(ContentBlock::Text {
-                    text: title.unwrap_or_else(|| "[document]".to_string()),
-                })
-            }
-            AnthropicContentBlock::InputAudio { .. } => {
-                user_blocks.push(ContentBlock::Text {
-                    text: "[audio]".to_string(),
-                })
-            }
+            AnthropicContentBlock::Document { title, .. } => user_blocks.push(ContentBlock::Text {
+                text: title.unwrap_or_else(|| "[document]".to_string()),
+            }),
+            AnthropicContentBlock::InputAudio { .. } => user_blocks.push(ContentBlock::Text {
+                text: "[audio]".to_string(),
+            }),
         }
     }
 
@@ -351,7 +384,7 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<Internal
                 content,
                 tool_calls: None,
                 tool_call_id: None,
-                extra: Default::default(),
+                extra,
             },
         );
     }

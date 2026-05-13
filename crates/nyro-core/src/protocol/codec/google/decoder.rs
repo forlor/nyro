@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::protocol::IngressDecoder;
+use crate::protocol::codec::tool_metadata::append_google_tool_call_metadata;
 use crate::protocol::ids::GOOGLE_GENERATE_V1BETA;
 use crate::protocol::types::*;
 
@@ -22,7 +23,10 @@ impl GoogleDecoder {
         // If the system instruction has non-text parts, preserve raw value.
         let needs_raw_system = req.system_instruction.as_ref().is_some_and(|si| {
             si.parts.len() > 1
-                || si.parts.iter().any(|p| !matches!(p, GooglePart::Text { .. }))
+                || si
+                    .parts
+                    .iter()
+                    .any(|p| !matches!(p, GooglePart::Text { .. }))
         });
 
         let raw_system: Option<Value> = if needs_raw_system {
@@ -129,9 +133,10 @@ impl GoogleDecoder {
 
         // Preserve full generationConfig so encoder can re-emit extended fields.
         if let Some(gen_cfg) = &req.generation_config
-            && let Ok(v) = serde_json::to_value(gen_cfg) {
-                extra.insert("__google_generation_config".into(), v);
-            }
+            && let Ok(v) = serde_json::to_value(gen_cfg)
+        {
+            extra.insert("__google_generation_config".into(), v);
+        }
 
         if let Some(v) = raw_system {
             extra.insert("__google_raw_system_instruction".into(), v);
@@ -140,17 +145,15 @@ impl GoogleDecoder {
             extra.insert("__google_raw_tools".into(), v);
         }
         if let Some(ref ss) = req.safety_settings
-            && let Ok(v) = serde_json::to_value(ss) {
-                extra.insert("__google_safety_settings".into(), v);
-            }
+            && let Ok(v) = serde_json::to_value(ss)
+        {
+            extra.insert("__google_safety_settings".into(), v);
+        }
         if let Some(ref tc) = req.tool_config {
             extra.insert("__google_tool_config".into(), tc.clone());
         }
         if let Some(ref cc) = req.cached_content {
-            extra.insert(
-                "__google_cached_content".into(),
-                Value::String(cc.clone()),
-            );
+            extra.insert("__google_cached_content".into(), Value::String(cc.clone()));
         }
 
         Ok(InternalRequest {
@@ -187,8 +190,9 @@ fn decode_content(content: GoogleContent) -> Result<InternalMessage> {
     let mut blocks: Vec<ContentBlock> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut has_function_response = false;
+    let mut extra: std::collections::HashMap<String, Value> = Default::default();
 
-    for part in content.parts {
+    for (index, part) in content.parts.into_iter().enumerate() {
         match part {
             GooglePart::Text { text } => {
                 text_parts.push(text.clone());
@@ -213,10 +217,18 @@ fn decode_content(content: GoogleContent) -> Result<InternalMessage> {
             }
             GooglePart::FunctionCall { function_call } => {
                 let id = format!("call_{}", uuid::Uuid::new_v4().simple());
+                append_google_tool_call_metadata(
+                    &mut extra,
+                    index,
+                    &id,
+                    &function_call.name,
+                    function_call.thought_signature.as_deref(),
+                );
                 tool_calls.push(ToolCall {
                     id: id.clone(),
                     name: function_call.name.clone(),
                     arguments: function_call.args.to_string(),
+                    thought_signature: function_call.thought_signature.clone(),
                 });
                 blocks.push(ContentBlock::ToolUse {
                     id,
@@ -236,7 +248,9 @@ fn decode_content(content: GoogleContent) -> Result<InternalMessage> {
                     text: executable_code.code,
                 });
             }
-            GooglePart::CodeExecutionResult { code_execution_result } => {
+            GooglePart::CodeExecutionResult {
+                code_execution_result,
+            } => {
                 let output = code_execution_result.output.unwrap_or_default();
                 blocks.push(ContentBlock::Text { text: output });
             }
@@ -272,6 +286,6 @@ fn decode_content(content: GoogleContent) -> Result<InternalMessage> {
         content: msg_content,
         tool_calls: tool_calls_opt,
         tool_call_id: None,
-        extra: Default::default(),
+        extra,
     })
 }

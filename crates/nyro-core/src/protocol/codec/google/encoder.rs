@@ -2,8 +2,9 @@ use anyhow::Result;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
 
-use crate::protocol::types::*;
 use crate::protocol::EgressEncoder;
+use crate::protocol::codec::tool_metadata::lookup_google_tool_call_thought_signature;
+use crate::protocol::types::*;
 
 pub struct GoogleEncoder;
 
@@ -46,13 +47,12 @@ impl EgressEncoder for GoogleEncoder {
         // ── generationConfig ──────────────────────────────────────────────────
         // Start from extra (full preserved config) and layer InternalRequest
         // overrides on top so model-override and routing changes still apply.
-        let mut gen_config: serde_json::Map<String, Value> = if let Some(Value::Object(m)) =
-            req.extra.get("__google_generation_config")
-        {
-            m.clone()
-        } else {
-            serde_json::Map::new()
-        };
+        let mut gen_config: serde_json::Map<String, Value> =
+            if let Some(Value::Object(m)) = req.extra.get("__google_generation_config") {
+                m.clone()
+            } else {
+                serde_json::Map::new()
+            };
 
         if let Some(t) = req.temperature {
             gen_config.insert("temperature".into(), t.into());
@@ -172,7 +172,10 @@ fn reconcile_required_with_properties(
                 .collect::<std::collections::BTreeSet<_>>()
         });
 
-    let Some(required) = out.get_mut("required").and_then(|value| value.as_array_mut()) else {
+    let Some(required) = out
+        .get_mut("required")
+        .and_then(|value| value.as_array_mut())
+    else {
         return;
     };
 
@@ -327,9 +330,21 @@ fn encode_content(msg: &InternalMessage) -> Result<Value> {
                 for tc in tcs {
                     let args: Value = serde_json::from_str(&tc.arguments)
                         .unwrap_or(Value::Object(Default::default()));
-                    parts.push(
-                        serde_json::json!({"functionCall": {"name": tc.name, "args": args}}),
-                    );
+                    let mut function_call = serde_json::json!({"name": tc.name, "args": args});
+                    let thought_signature = tc.thought_signature.clone().or_else(|| {
+                        lookup_google_tool_call_thought_signature(
+                            &msg.extra,
+                            None,
+                            Some(&tc.id),
+                            Some(&tc.name),
+                        )
+                    });
+                    if let Some(signature) = thought_signature
+                        && let Some(obj) = function_call.as_object_mut()
+                    {
+                        obj.insert("thoughtSignature".into(), Value::String(signature));
+                    }
+                    parts.push(serde_json::json!({"functionCall": function_call}));
                 }
                 parts
             } else {
@@ -338,7 +353,8 @@ fn encode_content(msg: &InternalMessage) -> Result<Value> {
         }
         MessageContent::Blocks(blocks) => blocks
             .iter()
-            .map(|b| match b {
+            .enumerate()
+            .map(|(index, b)| match b {
                 ContentBlock::Text { text } => serde_json::json!({"text": text}),
                 ContentBlock::Image { source } => {
                     serde_json::json!({
@@ -348,10 +364,23 @@ fn encode_content(msg: &InternalMessage) -> Result<Value> {
                         }
                     })
                 }
-                ContentBlock::ToolUse { id: _, name, input } => {
-                    serde_json::json!({"functionCall": {"name": name, "args": input}})
+                ContentBlock::ToolUse { id, name, input } => {
+                    let mut function_call = serde_json::json!({"name": name, "args": input});
+                    if let Some(signature) = lookup_google_tool_call_thought_signature(
+                        &msg.extra,
+                        Some(index),
+                        Some(id),
+                        Some(name),
+                    ) && let Some(obj) = function_call.as_object_mut()
+                    {
+                        obj.insert("thoughtSignature".into(), Value::String(signature));
+                    }
+                    serde_json::json!({"functionCall": function_call})
                 }
-                ContentBlock::ToolResult { tool_use_id, content } => {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                } => {
                     serde_json::json!({
                         "functionResponse": {"name": tool_use_id, "response": content}
                     })

@@ -2,8 +2,9 @@ use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
-use crate::protocol::types::*;
 use crate::protocol::EgressEncoder;
+use crate::protocol::codec::tool_metadata::lookup_google_tool_call_thought_signature;
+use crate::protocol::types::*;
 
 pub struct AnthropicEncoder;
 
@@ -82,10 +83,10 @@ impl EgressEncoder for AnthropicEncoder {
                             "name": builtin_type,
                         });
                         if let Some(desc) = &t.description {
-                            entry.as_object_mut().unwrap().insert(
-                                "description".into(),
-                                Value::String(desc.clone()),
-                            );
+                            entry
+                                .as_object_mut()
+                                .unwrap()
+                                .insert("description".into(), Value::String(desc.clone()));
                         }
                         entry
                     } else {
@@ -110,10 +111,7 @@ impl EgressEncoder for AnthropicEncoder {
         }
 
         // ── PR-10 extra fields ────────────────────────────────────────────────
-        for key in &[
-            "__anthropic_thinking",
-            "__anthropic_context_management",
-        ] {
+        for key in &["__anthropic_thinking", "__anthropic_context_management"] {
             if let Some(v) = req.extra.get(*key) {
                 let field_name = key.trim_start_matches("__anthropic_");
                 obj.insert(field_name.into(), v.clone());
@@ -135,10 +133,7 @@ impl EgressEncoder for AnthropicEncoder {
         validate_anthropic_payload(&body)?;
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "anthropic-version",
-            HeaderValue::from_static("2023-06-01"),
-        );
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
 
         Ok((body, headers))
     }
@@ -252,10 +247,8 @@ fn validate_anthropic_payload(body: &Value) -> Result<()> {
                 Value::String(_) => {}
                 Value::Array(blocks) => {
                     for (bidx, block) in blocks.iter().enumerate() {
-                        let btype = block
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
+                        let btype =
+                            block.get("type").and_then(|v| v.as_str()).ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "anthropic payload message[{idx}] block[{bidx}] missing type"
                                 )
@@ -268,8 +261,7 @@ fn validate_anthropic_payload(body: &Value) -> Result<()> {
                         match btype {
                             "tool_use" => {
                                 let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                let name =
-                                    block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
                                 if id.is_empty() || name.is_empty() {
                                     anyhow::bail!(
                                         "anthropic payload message[{idx}] tool_use block[{bidx}] missing id/name"
@@ -310,7 +302,13 @@ fn validate_anthropic_payload(body: &Value) -> Result<()> {
         if t != "auto" && t != "any" && t != "tool" {
             anyhow::bail!("anthropic tool_choice invalid type: {t}");
         }
-        if t == "tool" && tc.get("name").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if t == "tool"
+            && tc
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty()
+        {
             anyhow::bail!("anthropic tool_choice=tool missing name");
         }
     }
@@ -367,9 +365,10 @@ fn encode_message(msg: &InternalMessage) -> Result<Value> {
                         "thinking": text,
                     });
                     if let Some(signature) = reasoning_signature
-                        && let Some(obj) = block.as_object_mut() {
-                            obj.insert("signature".into(), serde_json::json!(signature));
-                        }
+                        && let Some(obj) = block.as_object_mut()
+                    {
+                        obj.insert("signature".into(), serde_json::json!(signature));
+                    }
                     blocks.push(block);
                 }
                 if !t.is_empty() {
@@ -379,12 +378,26 @@ fn encode_message(msg: &InternalMessage) -> Result<Value> {
                     for tc in tcs {
                         let input: Value = serde_json::from_str(&tc.arguments)
                             .unwrap_or(Value::Object(Default::default()));
-                        blocks.push(serde_json::json!({
+                        let mut tool_use = serde_json::json!({
                             "type": "tool_use",
                             "id": normalize_anthropic_tool_id(&tc.id),
                             "name": tc.name,
                             "input": input,
-                        }));
+                        });
+                        let thought_signature = tc.thought_signature.clone().or_else(|| {
+                            lookup_google_tool_call_thought_signature(
+                                &msg.extra,
+                                None,
+                                Some(&tc.id),
+                                Some(&tc.name),
+                            )
+                        });
+                        if let Some(signature) = thought_signature
+                            && let Some(obj) = tool_use.as_object_mut()
+                        {
+                            obj.insert("thought_signature".into(), serde_json::json!(signature));
+                        }
+                        blocks.push(tool_use);
                     }
                 }
                 Value::Array(blocks)
@@ -395,7 +408,8 @@ fn encode_message(msg: &InternalMessage) -> Result<Value> {
         MessageContent::Blocks(blocks) => {
             let arr: Vec<Value> = blocks
                 .iter()
-                .map(|b| match b {
+                .enumerate()
+                .map(|(index, b)| match b {
                     ContentBlock::Text { text } => {
                         serde_json::json!({"type": "text", "text": text})
                     }
@@ -416,18 +430,29 @@ fn encode_message(msg: &InternalMessage) -> Result<Value> {
                         });
                         if let Some(sig) = signature
                             && !sig.trim().is_empty()
-                                && let Some(obj) = block.as_object_mut() {
-                                    obj.insert("signature".into(), serde_json::json!(sig));
-                                }
+                            && let Some(obj) = block.as_object_mut()
+                        {
+                            obj.insert("signature".into(), serde_json::json!(sig));
+                        }
                         block
                     }
                     ContentBlock::ToolUse { id, name, input } => {
-                        serde_json::json!({
+                        let mut tool_use = serde_json::json!({
                             "type": "tool_use",
                             "id": normalize_anthropic_tool_id(id),
                             "name": name,
                             "input": input,
-                        })
+                        });
+                        if let Some(signature) = lookup_google_tool_call_thought_signature(
+                            &msg.extra,
+                            Some(index),
+                            Some(id),
+                            Some(name),
+                        ) && let Some(obj) = tool_use.as_object_mut()
+                        {
+                            obj.insert("thought_signature".into(), serde_json::json!(signature));
+                        }
+                        tool_use
                     }
                     ContentBlock::ToolResult {
                         tool_use_id,
@@ -456,7 +481,11 @@ fn anthropic_tool_result_payload(msg: &InternalMessage) -> (Value, Option<String
         MessageContent::Text(t) => (Value::String(t.clone()), None),
         MessageContent::Blocks(blocks) => {
             for block in blocks {
-                if let ContentBlock::ToolResult { tool_use_id, content } = block {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                } = block
+                {
                     return (content.clone(), Some(tool_use_id.clone()));
                 }
             }
@@ -505,9 +534,8 @@ fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
             let same_role = last.get("role").and_then(|v| v.as_str()) == Some(role);
             if same_role {
                 if let Some(last_obj) = last.as_object_mut() {
-                    let mut merged = content_to_blocks(
-                        last_obj.get("content").cloned().unwrap_or(Value::Null),
-                    );
+                    let mut merged =
+                        content_to_blocks(last_obj.get("content").cloned().unwrap_or(Value::Null));
                     merged.extend(blocks);
                     last_obj.insert("content".into(), Value::Array(merged));
                 }
@@ -533,9 +561,10 @@ fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
         let Some(arr) = msg.get_mut("content").and_then(|v| v.as_array_mut()) else {
             continue;
         };
-        if !arr.iter().any(|b| {
-            b.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-        }) {
+        if !arr
+            .iter()
+            .any(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
+        {
             continue;
         }
         let mut thinking: Vec<Value> = Vec::new();

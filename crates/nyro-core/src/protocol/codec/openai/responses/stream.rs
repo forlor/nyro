@@ -134,7 +134,8 @@ impl ResponsesStreamFormatter {
     fn emit_completed(&mut self) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
-        if let (Some(item_id), Some(output_index)) = (&self.reasoning_item_id, self.reasoning_output_index)
+        if let (Some(item_id), Some(output_index)) =
+            (&self.reasoning_item_id, self.reasoning_output_index)
         {
             let reasoning_done = serde_json::json!({
                 "type": "response.output_item.done",
@@ -343,7 +344,12 @@ impl StreamFormatter for ResponsesStreamFormatter {
                         ev.to_string(),
                     ));
                 }
-                StreamDelta::ToolCallStart { index, id, name } => {
+                StreamDelta::ToolCallStart {
+                    index,
+                    id,
+                    name,
+                    thought_signature: _,
+                } => {
                     self.ensure_started(&mut events);
                     let output_index = self.next_output_index;
                     self.next_output_index += 1;
@@ -382,19 +388,20 @@ impl StreamFormatter for ResponsesStreamFormatter {
                 }
                 StreamDelta::ToolCallDelta { index, arguments } => {
                     if let Some(pos) = self.tool_index_map.get(index).copied()
-                        && let Some(call) = self.tool_calls.get_mut(pos) {
-                            call.arguments.push_str(arguments);
-                            let ev = serde_json::json!({
-                                "type": "response.function_call_arguments.delta",
-                                "item_id": call.item_id,
-                                "output_index": call.output_index,
-                                "delta": arguments
-                            });
-                            events.push(SseEvent::new(
-                                Some("response.function_call_arguments.delta"),
-                                ev.to_string(),
-                            ));
-                        }
+                        && let Some(call) = self.tool_calls.get_mut(pos)
+                    {
+                        call.arguments.push_str(arguments);
+                        let ev = serde_json::json!({
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": call.item_id,
+                            "output_index": call.output_index,
+                            "delta": arguments
+                        });
+                        events.push(SseEvent::new(
+                            Some("response.function_call_arguments.delta"),
+                            ev.to_string(),
+                        ));
+                    }
                 }
                 StreamDelta::Usage(u) => {
                     self.usage = u.clone();
