@@ -1,7 +1,7 @@
 //! Thin ingress shell: POST /v1beta/models/:model_action
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, Uri};
 use axum::response::Response;
 use axum::Json;
 use serde_json::Value;
@@ -11,12 +11,14 @@ use crate::protocol::ids::GOOGLE_GENERATE_V1BETA;
 use crate::protocol::ir::{AiRequest, RawEnvelope};
 use crate::proxy::context::RequestContext;
 use crate::proxy::dispatcher::{dispatch_pipeline, error_response};
+use crate::proxy::security::inject_query_api_key_header;
 use crate::Gateway;
 
 pub async fn google_generate(
     State(gw): State<Gateway>,
     mut ctx: axum::extract::Extension<RequestContext>,
     headers: HeaderMap,
+    uri: Uri,
     Path(model_action): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
@@ -37,5 +39,7 @@ pub async fn google_generate(
         Err(e) => return error_response(400, &format!("invalid Gemini request: {e}")),
     };
     let request: AiRequest = internal.into();
-    dispatch_pipeline(gw, headers, envelope, request, GOOGLE_GENERATE_V1BETA).await
+    let mut auth_headers = headers.clone();
+    inject_query_api_key_header(&mut auth_headers, uri.query());
+    dispatch_pipeline(gw, auth_headers, envelope, request, GOOGLE_GENERATE_V1BETA).await
 }

@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use axum::http::{HeaderMap, header};
 use chrono::{NaiveDateTime, Utc};
+use reqwest::header::HeaderValue;
 
 use crate::db::models::{Provider, Route};
 use crate::error::{AccessDenial, AuthFailure, GatewayError, QuotaWindow};
@@ -242,6 +243,42 @@ pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// Extract a Gemini-style `?key=...` query parameter.
+pub fn extract_api_key_from_query(query: Option<&str>) -> Option<String> {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|segment| !segment.is_empty())
+        .find_map(|segment| {
+            let (name, value) = segment.split_once('=')?;
+            if name != "key" {
+                return None;
+            }
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        })
+}
+
+/// If the request has no header-based API key, promote Gemini `?key=...` into
+/// `x-api-key` so the normal gateway auth flow can reuse it unchanged.
+pub fn inject_query_api_key_header(headers: &mut HeaderMap, query: Option<&str>) {
+    if extract_api_key(headers).is_some() {
+        return;
+    }
+
+    let Some(key) = extract_api_key_from_query(query) else {
+        return;
+    };
+
+    if let Ok(value) = HeaderValue::from_str(&key) {
+        headers.insert("x-api-key", value);
+    }
+}
+
 pub(crate) fn is_key_expired(expires_at: &str) -> bool {
     if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(expires_at) {
         return parsed.with_timezone(&Utc) <= Utc::now();
@@ -260,4 +297,40 @@ pub async fn get_provider(
         .get_active_provider(id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("provider not found or inactive: {id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header::AUTHORIZATION;
+
+    #[test]
+    fn extract_api_key_from_query_reads_gemini_key() {
+        let key = extract_api_key_from_query(Some("alt=sse&key=gw_test_key"));
+        assert_eq!(key.as_deref(), Some("gw_test_key"));
+    }
+
+    #[test]
+    fn extract_api_key_from_query_ignores_missing_or_blank_key() {
+        assert_eq!(extract_api_key_from_query(Some("alt=sse")), None);
+        assert_eq!(extract_api_key_from_query(Some("key=")), None);
+        assert_eq!(extract_api_key_from_query(None), None);
+    }
+
+    #[test]
+    fn inject_query_api_key_header_promotes_gemini_key() {
+        let mut headers = HeaderMap::new();
+        inject_query_api_key_header(&mut headers, Some("key=gw_test_key"));
+        assert_eq!(extract_api_key(&headers).as_deref(), Some("gw_test_key"));
+    }
+
+    #[test]
+    fn inject_query_api_key_header_does_not_override_header_auth() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer header_key"));
+
+        inject_query_api_key_header(&mut headers, Some("key=query_key"));
+
+        assert_eq!(extract_api_key(&headers).as_deref(), Some("header_key"));
+    }
 }

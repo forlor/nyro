@@ -916,7 +916,9 @@ fn first_usable_candidate(snapshots: &[CandidateLoopSnapshot]) -> Option<String>
 }
 
 fn has_usable_content(state: &CandidateState) -> bool {
-    state.first_content_at.is_some() && state.error.as_deref() != Some("buffer overflow")
+    state.first_content_at.is_some()
+        && state.error.as_deref() != Some("buffer overflow")
+        && state.error.as_deref() != Some("buffer bytes overflow")
 }
 
 async fn collect_errors(
