@@ -35,6 +35,7 @@ async fn new_state(tag: &str) -> AppState {
         admin_bind_addr: "127.0.0.1:0".to_string(),
         database_url: temp_database_url(tag),
         bootstrap_json_path: None,
+        proxy_api_key: None,
     })
     .await
     .expect("create app state")
@@ -564,4 +565,113 @@ async fn google_proxy_requires_group_id_action_format() {
     let body = body_text(response).await;
     assert!(body.contains("group_id"));
     assert!(body.contains("action"));
+}
+
+#[tokio::test]
+async fn proxy_enforces_api_key_authentication() {
+    let mut state = new_state("proxy-auth").await;
+    state.config.proxy_api_key = Some("test-gateway-key".to_string());
+    
+    let (server_base, server_handle) = spawn_server(Router::new().route(
+        "/v1/chat/completions",
+        post(|| async { openai_sse("AUTH-OK", 10) }),
+    ))
+    .await;
+    
+    seed_single_openai_group(&state, "group-auth", &server_base, 1000).await;
+    let router = build_proxy_router(state);
+
+    // 1. Request with no key should fail with 401
+    let no_key_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/openai/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "group-auth",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("unauthorized request");
+    assert_eq!(no_key_response.status(), StatusCode::UNAUTHORIZED);
+    let no_key_body = body_text(no_key_response).await;
+    assert!(no_key_body.contains("Unauthorized: missing or invalid API key"));
+
+    // 2. Request with wrong key should fail with 401
+    let wrong_key_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/openai/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-api-key", "wrong-key")
+                .body(Body::from(
+                    json!({
+                        "model": "group-auth",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("wrong key request");
+    assert_eq!(wrong_key_response.status(), StatusCode::UNAUTHORIZED);
+
+    // 3. Request with correct x-api-key should succeed (200 OK)
+    let correct_x_key_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/openai/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-api-key", "test-gateway-key")
+                .body(Body::from(
+                    json!({
+                        "model": "group-auth",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("correct x-key request");
+    assert_eq!(correct_x_key_response.status(), StatusCode::OK);
+
+    // 4. Request with correct Authorization Bearer should succeed (200 OK)
+    let correct_bearer_response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/openai/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("Authorization", "Bearer test-gateway-key")
+                .body(Body::from(
+                    json!({
+                        "model": "group-auth",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("correct bearer request");
+    assert_eq!(correct_bearer_response.status(), StatusCode::OK);
+
+    server_handle.abort();
 }

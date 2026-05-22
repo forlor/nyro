@@ -6,6 +6,7 @@ pub struct AppConfig {
     pub admin_bind_addr: String,
     pub database_url: String,
     pub bootstrap_json_path: Option<String>,
+    pub proxy_api_key: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -15,6 +16,7 @@ impl Default for AppConfig {
             admin_bind_addr: "127.0.0.1:2091".to_string(),
             database_url: "sqlite://race-gateway.db".to_string(),
             bootstrap_json_path: None,
+            proxy_api_key: None,
         }
     }
 }
@@ -48,6 +50,13 @@ impl AppConfig {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
                 config.bootstrap_json_path = Some(trimmed.to_string());
+            }
+        }
+
+        if let Ok(value) = env::var("RACE_GATEWAY_PROXY_API_KEY") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                config.proxy_api_key = Some(trimmed.to_string());
             }
         }
 

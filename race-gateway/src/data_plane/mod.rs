@@ -129,6 +129,8 @@ async fn proxy_route(
     state: AppState,
     request: ProxyRouteRequest,
 ) -> Result<Response<Body>, ProxyError> {
+    validate_proxy_auth(&state, &request.headers)?;
+
     let runner = RaceRunner::new(state.clone());
     let execution = runner
         .race_stream(request)
@@ -145,6 +147,39 @@ async fn proxy_route(
     response
         .body(Body::from_stream(stream))
         .map_err(|error| ProxyError::internal(anyhow::Error::new(error)))
+}
+
+fn validate_proxy_auth(state: &AppState, headers: &HeaderMap) -> Result<(), ProxyError> {
+    let Some(configured_key) = state.config.proxy_api_key.as_deref() else {
+        return Ok(());
+    };
+
+    // 1. Check Authorization header
+    let auth_header_valid = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            let token = value.strip_prefix("Bearer ").unwrap_or(value).trim();
+            token == configured_key
+        })
+        .unwrap_or(false);
+
+    if auth_header_valid {
+        return Ok(());
+    }
+
+    // 2. Check x-api-key header
+    let api_key_valid = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim() == configured_key)
+        .unwrap_or(false);
+
+    if api_key_valid {
+        return Ok(());
+    }
+
+    Err(ProxyError::unauthorized("Unauthorized: missing or invalid API key".to_string()))
 }
 
 #[derive(Debug, Serialize)]
@@ -166,6 +201,13 @@ impl ProxyError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: error.to_string(),
+        }
+    }
+
+    fn unauthorized(message: String) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message,
         }
     }
 

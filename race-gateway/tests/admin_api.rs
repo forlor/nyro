@@ -27,6 +27,7 @@ async fn new_state(tag: &str) -> AppState {
         admin_bind_addr: "127.0.0.1:0".to_string(),
         database_url: temp_database_url(tag),
         bootstrap_json_path: None,
+        proxy_api_key: None,
     })
     .await
     .expect("create app state")
